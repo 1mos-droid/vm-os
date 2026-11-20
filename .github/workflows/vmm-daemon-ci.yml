@@ -1,0 +1,40 @@
+name: VMM Daemon CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vmm-daemon/**"
+      - "ARCHITECTURE.md"
+      - ".github/workflows/vmm-daemon-ci.yml"
+  pull_request:
+    paths:
+      - "vmm-daemon/**"
+      - "ARCHITECTURE.md"
+      - ".github/workflows/vmm-daemon-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vmm-daemon-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vmm-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run unit and integration tests
+        run: cargo test --all-targets
