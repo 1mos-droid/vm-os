@@ -35,7 +35,8 @@ kernel = config(ext / 'kernel/hyperos.config', 'CONFIG_')
 config(ext / 'configs/busybox.fragment', 'CONFIG_')
 for symbol in ('BR2_x86_64', 'BR2_TOOLCHAIN_BUILDROOT_MUSL', 'BR2_INIT_NONE',
                'BR2_SYSTEM_BIN_SH_DASH', 'BR2_PACKAGE_BUSYBOX', 'BR2_PACKAGE_RUNIT',
-               'BR2_TARGET_GRUB2', 'BR2_TARGET_ROOTFS_EXT2_4'):
+               'BR2_TARGET_GRUB2', 'BR2_TARGET_ROOTFS_EXT2_4',
+               'BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12'):
     require(br.get(symbol) == 'y', f'{symbol} must be enabled')
 for symbol in ('KVM', 'KVM_INTEL', 'KVM_AMD', 'ZRAM', 'ZRAM_BACKEND_ZSTD', 'KSM',
                'VIRTIO_PCI', 'VIRTIO_BLK', 'VIRTIO_NET', 'VIRTIO_BALLOON',
