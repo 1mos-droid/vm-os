@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+for service in zram ksm storage; do
+    while [ ! -f "/run/hyperos/ready/$service" ]; do sleep 1; done
+done
+mountpoint -q /var/lib/hyperos
+# Application integration supplies this binary; no placeholder daemon is shipped.
+if [ ! -x /usr/bin/vmm-daemon ]; then
+    echo 'vmm-daemon: install /usr/bin/vmm-daemon to enable VM management' >&2
+    sleep 60
+    exit 1
+fi
+umask 077
+exec /usr/bin/vmm-daemon

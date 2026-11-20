@@ -1,0 +1,6 @@
+config BR2_PACKAGE_RUNIT
+	bool "runit"
+	depends on BR2_x86_64
+	depends on BR2_INIT_NONE
+	help
+	  HyperOS init and service supervision (Linux x86_64 only).

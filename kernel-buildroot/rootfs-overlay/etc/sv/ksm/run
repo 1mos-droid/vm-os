@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+echo 1 > /sys/kernel/mm/ksm/run
+touch /run/hyperos/ready/ksm
+exec sleep 2147483647
