@@ -1,0 +1,5 @@
+# Exclude helper shell scripts and docs from skewing the language bar
+guest-images/*.sh linguist-vendored
+kernel-buildroot/scripts/*.sh linguist-vendored
+docs/* linguist-documentation
+*.md linguist-documentation
