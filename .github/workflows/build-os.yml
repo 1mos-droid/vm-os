@@ -17,6 +17,8 @@ jobs:
       BUILDROOT_VERSION: 2025.02.1
       # Buildroot 2025.02 host tools predate the compiler defaulting to C23.
       HOSTCC: gcc -std=gnu17
+      # Use Buildroot's pinned CMake; CMake 4 rejects older bundled projects.
+      BR2_CMAKE_CANDIDATES: ""
       BR2_DL_DIR: ${{ github.workspace }}/dl
     steps:
       - uses: actions/checkout@v4
