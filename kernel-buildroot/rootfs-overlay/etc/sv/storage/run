@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+if ! mountpoint -q /var/lib/hyperos; then
+    mount -t btrfs -o noatime,compress=zstd LABEL=hyperos-data /var/lib/hyperos
+fi
+# Never format or silently fall back to the root filesystem on mount failure.
+awk '$2 == "/var/lib/hyperos" && $3 == "btrfs" { found=1 } END { exit !found }' /proc/mounts
+mkdir -p /var/lib/hyperos/base-images /var/lib/hyperos/instances
+chmod 0700 /var/lib/hyperos /var/lib/hyperos/base-images /var/lib/hyperos/instances
+touch /run/hyperos/ready/storage
+exec sleep 2147483647

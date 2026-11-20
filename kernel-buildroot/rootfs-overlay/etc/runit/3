@@ -1,0 +1,8 @@
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+sv -w 15 force-stop /run/service/vmm-daemon || true
+sv -w 5 force-stop /run/service/zram /run/service/ksm /run/service/storage || true
+swapoff /dev/zram0 || true
+sync
+umount /var/lib/hyperos || true
+mount -o remount,ro / || true

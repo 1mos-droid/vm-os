@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_HYPEROS_PATH/package/runit/Config.in"

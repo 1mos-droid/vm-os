@@ -1,0 +1,68 @@
+name: Build HyperOS
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hyperos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      BUILDROOT_VERSION: 2025.02.1
+      # Buildroot 2025.02 host tools predate the compiler defaulting to C23.
+      HOSTCC: ${{ github.workspace }}/scripts/host-gcc-gnu17
+      # Use Buildroot's pinned CMake; CMake 4 rejects older bundled projects.
+      BR2_CMAKE_CANDIDATES: ""
+      BR2_DL_DIR: ${{ github.workspace }}/dl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate source configuration
+        run: scripts/validate-configs.sh
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex cpio rsync file wget unzip python3 libncurses-dev libssl-dev
+      - uses: actions/cache@v4
+        with:
+          path: dl
+          key: buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/**') }}
+          restore-keys: |
+            buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-
+      - name: Fetch pinned Buildroot
+        run: |
+          curl --fail --location --retry 3 "https://buildroot.org/downloads/buildroot-${BUILDROOT_VERSION}.tar.xz" -o buildroot.tar.xz
+          echo 'a3216907e7ce1bbd38413e20b0861641b160ecc40dd7b598febb7f12984b3206  buildroot.tar.xz' | sha256sum -c -
+          mkdir buildroot
+          tar -xf buildroot.tar.xz -C buildroot --strip-components=1
+      - name: Resolve and validate Buildroot configuration
+        run: |
+          make -C buildroot O="$GITHUB_WORKSPACE/output" BR2_EXTERNAL="$GITHUB_WORKSPACE/kernel-buildroot" hyperos_x86_64_defconfig
+          scripts/validate-configs.sh --resolved-buildroot output/.config
+      - name: Build kernel and bootable root filesystem
+        run: make -C buildroot O="$GITHUB_WORKSPACE/output" -j2
+      - name: Validate resolved kernel and image outputs
+        run: |
+          scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
+          test -s output/images/hyperos.img
+          test -s output/images/bzImage
+          test -s output/images/rootfs.ext2
+          test -x output/target/sbin/runit
+          test "$(readlink output/target/sbin/init)" = runit
+          test "$(readlink output/target/bin/sh)" = dash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyperos-x86_64-bios-${{ github.sha }}
+          if-no-files-found: error
+          compression-level: 1
+          path: |
+            output/images/hyperos.img
+            output/images/bzImage
+            output/images/rootfs.ext2
+            output/.config
+            output/build/linux-6.12.20/.config
