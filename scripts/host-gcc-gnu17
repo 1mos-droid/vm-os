@@ -1,0 +1,5 @@
+#!/bin/sh
+# Host C compiler for Buildroot (HOSTCC): pinned host tools predate compilers
+# defaulting to C23. A wrapper keeps the flag C-only and gives CMake a real
+# compiler path; HOST_CFLAGS would leak into C++ via HOST_CXXFLAGS.
+exec gcc -std=gnu17 "$@"

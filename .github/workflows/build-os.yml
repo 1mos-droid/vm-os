@@ -16,8 +16,7 @@ jobs:
     env:
       BUILDROOT_VERSION: 2025.02.1
       # Buildroot 2025.02 host tools predate the compiler defaulting to C23.
-      # Pass the standard as a flag: HOSTCC becomes CMAKE_C_COMPILER verbatim.
-      HOST_CFLAGS: -O2 -std=gnu17
+      HOSTCC: ${{ github.workspace }}/scripts/host-gcc-gnu17
       # Use Buildroot's pinned CMake; CMake 4 rejects older bundled projects.
       BR2_CMAKE_CANDIDATES: ""
       BR2_DL_DIR: ${{ github.workspace }}/dl
