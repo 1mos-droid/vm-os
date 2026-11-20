@@ -1,0 +1,894 @@
+import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+
+export struct VmItem {
+    vm-id: string,
+    short-id: string,
+    name: string,
+    base-image-id: string,
+    vcpu-count: int,
+    ram-mib: int,
+    balloon-target-mib: int,
+    network-mode: string,
+    state: string,
+    ephemeral: bool,
+    desired-min-ram-mib: int,
+}
+
+export struct TemplateItem {
+    image-id: string,
+    label: string,
+    description: string,
+    recommended-min-ram-mib: int,
+    recommended-max-ram-mib: int,
+    recommended-vcpus: int,
+}
+
+component MeterBar inherits Rectangle {
+    in property <float> ratio: 0.0;
+    in property <color> fill-color: #38bdf8;
+    height: 10px;
+    border-radius: 5px;
+    background: #1e293b;
+    clip: true;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        height: parent.height;
+        width: parent.width * Math.clamp(root.ratio, 0.0, 1.0);
+        border-radius: 5px;
+        background: root.fill-color;
+    }
+}
+
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> bg: #334155;
+    in property <color> fg: #e2e8f0;
+    border-radius: 4px;
+    background: root.bg;
+    horizontal-stretch: 0;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        Text {
+            text: root.text;
+            color: root.fg;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "HyperOS VM Control";
+    preferred-width: 1020px;
+    preferred-height: 740px;
+    min-width: 820px;
+    min-height: 600px;
+    background: #0f172a;
+
+    // Navigation & connection state
+    in-out property <int> active-tab: 0; // 0 = Dashboard, 1 = Create Controlled VM
+    in property <string> backend-label: "/run/hyperos/vmm.sock";
+    in property <bool> backend-connected: false;
+    in property <bool> mock-mode: false;
+
+    // Host memory & ZRAM telemetry
+    in property <float> ram-usage-ratio: 0.0;
+    in property <string> ram-summary: "0 / 0 MiB";
+    in property <string> ram-detail: "Available: 0 MiB";
+    in property <float> zram-usage-ratio: 0.0;
+    in property <string> zram-summary: "Unavailable";
+    in property <string> zram-detail: "No /sys/block/zram0/mm_stat";
+
+    // VM list & status banner
+    in property <[VmItem]> vms: [];
+    in property <string> status-message: "";
+    in property <bool> status-is-error: false;
+
+    // Hard power-off confirmation modal state (ARCHITECTURE.md: stop_vm is hard power-off)
+    in-out property <bool> confirm-stop-visible: false;
+    in-out property <string> confirm-stop-vm-id: "";
+    in-out property <string> confirm-stop-vm-name: "";
+    in-out property <bool> confirm-stop-vm-ephemeral: false;
+
+    // Create Controlled VM Wizard state
+    in property <[TemplateItem]> templates: [];
+    in-out property <int> wizard-template-index: 0;
+    in-out property <string> wizard-name: "";
+    in-out property <int> wizard-max-ram-mib: 1024;
+    in-out property <int> wizard-min-ram-mib: 256;
+    in-out property <int> wizard-vcpu-count: 1;
+    in property <int> max-host-cpus: 4;
+    in-out property <int> wizard-network-mode: 0; // 0=isolated, 1=nat, 2=host-only
+    in-out property <bool> wizard-ephemeral: false;
+
+    // Callbacks wired in Rust
+    callback refresh-requested();
+    callback start-vm(string);
+    callback pause-vm(string);
+    callback snapshot-vm(string);
+    callback confirm-stop-vm(string);
+    callback adjust-balloon-ram(string, int);
+    callback change-network-mode(string, string);
+    callback select-template(int);
+    callback create-vm-submitted();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // Top Navigation Bar
+        Rectangle {
+            height: 54px;
+            border-radius: 8px;
+            background: #1e293b;
+            border-width: 1px;
+            border-color: #334155;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Text {
+                        text: "HyperOS Control";
+                        color: #f8fafc;
+                        font-size: 18px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        width: 1px;
+                        height: 24px;
+                        y: 15px;
+                        background: #334155;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            y: 22px;
+                            border-radius: 5px;
+                            background: root.backend-connected ? #22c55e : #ef4444;
+                        }
+                        Text {
+                            text: root.backend-label;
+                            color: #cbd5e1;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if root.mock-mode : Badge {
+                        text: "MOCK";
+                        bg: #4f46e5;
+                        fg: #eef2ff;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: "Dashboard";
+                        primary: root.active-tab == 0;
+                        clicked => { root.active-tab = 0; }
+                    }
+                    Button {
+                        text: "+ Create Controlled VM";
+                        primary: root.active-tab == 1;
+                        clicked => { root.active-tab = 1; }
+                    }
+                    Button {
+                        text: "Refresh";
+                        clicked => { root.refresh-requested(); }
+                    }
+                }
+            }
+        }
+
+        // Status / Error Notification Banner
+        if root.status-message != "" : Rectangle {
+            border-radius: 6px;
+            background: root.status-is-error ? #450a0a : #052e16;
+            border-width: 1px;
+            border-color: root.status-is-error ? #dc2626 : #16a34a;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                alignment: space-between;
+
+                Text {
+                    text: root.status-message;
+                    color: root.status-is-error ? #fecaca : #bbf7d0;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ================= VIEW 1: DASHBOARD =================
+        if root.active-tab == 0 : VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            // Host RAM & ZRAM Telemetry Cards
+            HorizontalLayout {
+                spacing: 12px;
+
+                // Host RAM Meter Card
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 8px;
+                    background: #1e293b;
+                    border-width: 1px;
+                    border-color: #334155;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "Host RAM (/proc/meminfo)";
+                                color: #94a3b8;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: root.ram-summary;
+                                color: #f8fafc;
+                                font-size: 13px;
+                                font-weight: 700;
+                            }
+                        }
+
+                        MeterBar {
+                            ratio: root.ram-usage-ratio;
+                            fill-color: root.ram-usage-ratio > 0.85 ? #ef4444 : root.ram-usage-ratio > 0.65 ? #f59e0b : #38bdf8;
+                        }
+
+                        Text {
+                            text: root.ram-detail;
+                            color: #94a3b8;
+                            font-size: 11px;
+                        }
+                    }
+                }
+
+                // ZRAM Meter Card
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 8px;
+                    background: #1e293b;
+                    border-width: 1px;
+                    border-color: #334155;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "ZRAM Swap (/sys/block/zram0/mm_stat)";
+                                color: #94a3b8;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: root.zram-summary;
+                                color: #f8fafc;
+                                font-size: 13px;
+                                font-weight: 700;
+                            }
+                        }
+
+                        MeterBar {
+                            ratio: root.zram-usage-ratio;
+                            fill-color: #a855f7;
+                        }
+
+                        Text {
+                            text: root.zram-detail;
+                            color: #94a3b8;
+                            font-size: 11px;
+                        }
+                    }
+                }
+            }
+
+            // VM List Header
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: "Managed Virtual Machines (" + root.vms.length + ")";
+                    color: #f8fafc;
+                    font-size: 15px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "Sorted by vm_id • Btrfs CoW storage: /var/lib/hyperos/instances/";
+                    color: #64748b;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Empty State
+            if root.vms.length == 0 : Rectangle {
+                vertical-stretch: 1;
+                border-radius: 8px;
+                background: #1e293b;
+                border-width: 1px;
+                border-color: #334155;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Text {
+                        text: "No VMs registered on this host.";
+                        color: #cbd5e1;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Launch Create Controlled VM Wizard";
+                            primary: true;
+                            clicked => { root.active-tab = 1; }
+                        }
+                    }
+                }
+            }
+
+            // VM List ScrollView
+            if root.vms.length > 0 : ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    for vm in root.vms : Rectangle {
+                        border-radius: 8px;
+                        background: #1e293b;
+                        border-width: 1px;
+                        border-color: vm.state == "running" ? #15803d : vm.state == "paused" ? #b45309 : vm.state == "failed" ? #b91c1c : #334155;
+
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 10px;
+
+                            // Top row: identity + primary lifecycle controls
+                            HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 12px;
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: vm.name;
+                                            color: #f8fafc;
+                                            font-size: 15px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                        Badge {
+                                            text: vm.state;
+                                            bg: vm.state == "running" ? #166534 : vm.state == "paused" ? #854d0e : vm.state == "failed" ? #991b1b : #334155;
+                                            fg: #f8fafc;
+                                        }
+                                        Badge {
+                                            text: vm.network-mode;
+                                            bg: vm.network-mode == "isolated" ? #1e3a8a : vm.network-mode == "nat" ? #0f766e : #6b21a8;
+                                            fg: #f8fafc;
+                                        }
+                                        if vm.ephemeral : Badge {
+                                            text: "ephemeral";
+                                            bg: #7c2d12;
+                                            fg: #ffedd5;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "ID: " + vm.short-id + "  •  Image: " + vm.base-image-id + "  •  " + vm.vcpu-count + " vCPU  •  Balloon: " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB";
+                                        color: #94a3b8;
+                                        font-size: 12px;
+                                    }
+                                }
+
+                                // Primary Action Controls: start_vm, pause_vm, snapshot_vm, stop_vm
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: end;
+
+                                    Button {
+                                        text: vm.state == "paused" ? "Resume" : "Start";
+                                        enabled: vm.state != "running";
+                                        primary: vm.state == "stopped" || vm.state == "paused";
+                                        clicked => { root.start-vm(vm.vm-id); }
+                                    }
+                                    Button {
+                                        text: "Pause";
+                                        enabled: vm.state == "running";
+                                        clicked => { root.pause-vm(vm.vm-id); }
+                                    }
+                                    Button {
+                                        text: "Snapshot";
+                                        enabled: vm.state == "stopped";
+                                        clicked => { root.snapshot-vm(vm.vm-id); }
+                                    }
+                                    Button {
+                                        text: "Stop";
+                                        enabled: vm.state == "running" || vm.state == "paused";
+                                        clicked => {
+                                            root.confirm-stop-vm-id = vm.vm-id;
+                                            root.confirm-stop-vm-name = vm.name;
+                                            root.confirm-stop-vm-ephemeral = vm.ephemeral;
+                                            root.confirm-stop-visible = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Secondary row: live ballooning (when running) or network mode (when stopped)
+                            HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 8px;
+
+                                if vm.state == "running" : HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Live Balloon (set_balloon_ram):";
+                                        color: #94a3b8;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Button {
+                                        text: "-128 MiB";
+                                        enabled: vm.balloon-target-mib > 128;
+                                        clicked => {
+                                            root.adjust-balloon-ram(vm.vm-id, Math.max(128, vm.balloon-target-mib - 128));
+                                        }
+                                    }
+                                    Button {
+                                        text: "+128 MiB";
+                                        enabled: vm.balloon-target-mib < vm.ram-mib;
+                                        clicked => {
+                                            root.adjust-balloon-ram(vm.vm-id, Math.min(vm.ram-mib, vm.balloon-target-mib + 128));
+                                        }
+                                    }
+                                    if vm.desired-min-ram-mib >= 128 && vm.desired-min-ram-mib < vm.ram-mib && vm.balloon-target-mib != vm.desired-min-ram-mib : Button {
+                                        text: "Apply Min (" + vm.desired-min-ram-mib + " MiB)";
+                                        clicked => {
+                                            root.adjust-balloon-ram(vm.vm-id, vm.desired-min-ram-mib);
+                                        }
+                                    }
+                                }
+
+                                if vm.state == "stopped" : HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Network Sandbox (set_network_mode):";
+                                        color: #94a3b8;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    Button {
+                                        text: "isolated";
+                                        enabled: vm.network-mode != "isolated";
+                                        clicked => { root.change-network-mode(vm.vm-id, "isolated"); }
+                                    }
+                                    Button {
+                                        text: "nat";
+                                        enabled: vm.network-mode != "nat";
+                                        clicked => { root.change-network-mode(vm.vm-id, "nat"); }
+                                    }
+                                    Button {
+                                        text: "host-only";
+                                        enabled: vm.network-mode != "host-only";
+                                        clicked => { root.change-network-mode(vm.vm-id, "host-only"); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= VIEW 2: CREATE CONTROLLED VM WIZARD =================
+        if root.active-tab == 1 : ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                spacing: 14px;
+                padding-right: 8px;
+
+                Rectangle {
+                    border-radius: 8px;
+                    background: #1e293b;
+                    border-width: 1px;
+                    border-color: #334155;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 14px;
+
+                        Text {
+                            text: "Create Controlled VM Wizard";
+                            color: #f8fafc;
+                            font-size: 17px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Provisions a Btrfs CoW reflink instance via create_vm (returns stopped; balloon target resets to Max RAM on cold start).";
+                            color: #94a3b8;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+
+                        // 1. VM Name
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "VM Name (1–64 characters, no control characters)";
+                                color: #cbd5e1;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            LineEdit {
+                                placeholder-text: "e.g. alpine-sandbox";
+                                text <=> root.wizard-name;
+                            }
+                        }
+
+                        // 2. Guest Template Picker
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: "Guest Template (/var/lib/hyperos/base-images/<image_id>/)";
+                                color: #cbd5e1;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                for tpl[idx] in root.templates : Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 6px;
+                                    background: root.wizard-template-index == idx ? #1e3a8a : #0f172a;
+                                    border-width: 1px;
+                                    border-color: root.wizard-template-index == idx ? #38bdf8 : #334155;
+
+                                    TouchArea {
+                                        clicked => { root.select-template(idx); }
+                                    }
+
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 4px;
+                                        Text {
+                                            text: tpl.label;
+                                            color: #f8fafc;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: "base_image_id: " + tpl.image-id;
+                                            color: #7dd3fc;
+                                            font-size: 11px;
+                                        }
+                                        Text {
+                                            text: tpl.description;
+                                            color: #94a3b8;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Dynamic Memory Ballooning Sliders (Max RAM + Min RAM)
+                        Rectangle {
+                            border-radius: 6px;
+                            background: #0f172a;
+                            border-width: 1px;
+                            border-color: #334155;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+
+                                Text {
+                                    text: "Dynamic Memory Ballooning (virtio-balloon)";
+                                    color: #e2e8f0;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+
+                                // Max RAM Slider (create_vm.ram_mib: 128..=3072)
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text {
+                                            text: "Max RAM (crosvm fixed ceiling — create_vm.ram_mib)";
+                                            color: #cbd5e1;
+                                            font-size: 12px;
+                                        }
+                                        Text {
+                                            text: root.wizard-max-ram-mib + " MiB";
+                                            color: #38bdf8;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                        }
+                                    }
+                                    Slider {
+                                        minimum: 128;
+                                        maximum: 3072;
+                                        value: root.wizard-max-ram-mib;
+                                        changed(val) => {
+                                            root.wizard-max-ram-mib = Math.clamp(Math.round(val / 64) * 64, 128, 3072);
+                                            if (root.wizard-min-ram-mib > root.wizard-max-ram-mib) {
+                                                root.wizard-min-ram-mib = root.wizard-max-ram-mib;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Min RAM Slider (balloon target: 128..=Max RAM)
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text {
+                                            text: "Min RAM (target usable RAM via set_balloon_ram)";
+                                            color: #cbd5e1;
+                                            font-size: 12px;
+                                        }
+                                        Text {
+                                            text: root.wizard-min-ram-mib + " MiB (reclaimable: " + Math.max(0, root.wizard-max-ram-mib - root.wizard-min-ram-mib) + " MiB)";
+                                            color: #a855f7;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                        }
+                                    }
+                                    Slider {
+                                        minimum: 128;
+                                        maximum: Math.max(128, root.wizard-max-ram-mib);
+                                        value: root.wizard-min-ram-mib;
+                                        changed(val) => {
+                                            root.wizard-min-ram-mib = Math.clamp(Math.round(val / 64) * 64, 128, root.wizard-max-ram-mib);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4. vCPU Count Selector + Network Sandbox Mode Selector
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            // vCPU selector
+                            Rectangle {
+                                width: 220px;
+                                border-radius: 6px;
+                                background: #0f172a;
+                                border-width: 1px;
+                                border-color: #334155;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: "vCPU Count (1–" + root.max-host-cpus + ")";
+                                        color: #cbd5e1;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        alignment: start;
+                                        Button {
+                                            text: "−";
+                                            enabled: root.wizard-vcpu-count > 1;
+                                            clicked => { root.wizard-vcpu-count = Math.max(1, root.wizard-vcpu-count - 1); }
+                                        }
+                                        Text {
+                                            text: root.wizard-vcpu-count + " vCPU";
+                                            color: #f8fafc;
+                                            font-size: 15px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                        Button {
+                                            text: "+";
+                                            enabled: root.wizard-vcpu-count < root.max-host-cpus;
+                                            clicked => { root.wizard-vcpu-count = Math.min(root.max-host-cpus, root.wizard-vcpu-count + 1); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Network sandbox mode selector
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: #0f172a;
+                                border-width: 1px;
+                                border-color: #334155;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Network Sandbox Mode (network_mode)";
+                                        color: #cbd5e1;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Button {
+                                            text: "isolated";
+                                            primary: root.wizard-network-mode == 0;
+                                            clicked => { root.wizard-network-mode = 0; }
+                                        }
+                                        Button {
+                                            text: "nat";
+                                            primary: root.wizard-network-mode == 1;
+                                            clicked => { root.wizard-network-mode = 1; }
+                                        }
+                                        Button {
+                                            text: "host-only";
+                                            primary: root.wizard-network-mode == 2;
+                                            clicked => { root.wizard-network-mode = 2; }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.wizard-network-mode == 0
+                                            ? "isolated: No virtual NIC; zero host/guest or inter-guest network path."
+                                            : root.wizard-network-mode == 1
+                                            ? "nat: Per-VM TAP + outbound masquerade; no inbound or inter-VM traffic."
+                                            : "host-only: Per-VM TAP for host-guest traffic; no uplink or inter-VM path.";
+                                        color: #94a3b8;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 5. Ephemeral Toggle
+                        Rectangle {
+                            border-radius: 6px;
+                            background: #0f172a;
+                            border-width: 1px;
+                            border-color: #334155;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+
+                                CheckBox {
+                                    text: "Ephemeral mode (mark CoW overlay for deletion on shutdown)";
+                                    checked <=> root.wizard-ephemeral;
+                                }
+                                Text {
+                                    text: "Note: create_vm strictly sends the 5 ARCHITECTURE.md v1 contract fields; ephemeral overlay disposal is tracked in UI policy pending daemon v2 delete RPC.";
+                                    color: #64748b;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Submit Bar
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 10px;
+                            Button {
+                                text: "Cancel";
+                                clicked => { root.active-tab = 0; }
+                            }
+                            Button {
+                                text: "Create VM";
+                                primary: true;
+                                clicked => { root.create-vm-submitted(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ================= HARD POWER-OFF CONFIRMATION MODAL =================
+    if root.confirm-stop-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: #020617cc;
+
+        TouchArea {}
+
+        Rectangle {
+            width: 480px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 10px;
+            background: #1e293b;
+            border-width: 1px;
+            border-color: #dc2626;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+
+                Text {
+                    text: "Hard Power-Off Warning";
+                    color: #fca5a5;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Stopping \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately terminates crosvm without graceful guest shutdown. Unsaved guest data may be lost.";
+                    color: #e2e8f0;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                if root.confirm-stop-vm-ephemeral : Text {
+                    text: "This VM is marked Ephemeral (CoW overlay flagged for post-shutdown disposal).";
+                    color: #fdba74;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.confirm-stop-visible = false; }
+                    }
+                    Button {
+                        text: "Force Stop VM";
+                        primary: true;
+                        clicked => {
+                            root.confirm-stop-visible = false;
+                            root.confirm-stop-vm(root.confirm-stop-vm-id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

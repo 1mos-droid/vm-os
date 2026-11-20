@@ -1,0 +1,26 @@
+[package]
+name = "vm-control-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native desktop GUI client for the HyperOS vmm-daemon JSON-RPC 2.0 API"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+slint = { version = "1.19", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-software",
+    "compat-1-2",
+] }
+uuid = { version = "1.11", features = ["v4"] }
+
+[build-dependencies]
+slint-build = "1.19"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
