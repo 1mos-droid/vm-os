@@ -191,6 +191,7 @@ production use.
 ```sh
 scripts/validate-configs.sh
 # Download/extract the pinned Buildroot archive (see workflow), then:
+export HOSTCC="gcc -std=gnu17"
 make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/kernel-buildroot" hyperos_x86_64_defconfig
 scripts/validate-configs.sh --resolved-buildroot output/.config
 make -C buildroot O="$PWD/output" -j2
@@ -213,6 +214,10 @@ is not extra RAM. KSM is enabled globally; daemon must mark guest mappings
 mergeable. Cross-VM page sharing has side-channel implications: this host profile
 is for mutually trusted guests. Stop/reboot via `runit-init 0` / `runit-init 6`;
 shutdown stops daemon before unmounting storage. No guest images are bundled.
+
+CI keeps ubuntu-latest and explicitly builds host C tools in GNU17 mode; the
+pinned host m4/gnulib predates newer compilers defaulting to C23. This does not
+change the target musl toolchain.
 
 CI validates shell syntax, source config invariants, resolved Buildroot options,
 and resolved Linux options, builds and uploads the image. On a KVM-capable target,
