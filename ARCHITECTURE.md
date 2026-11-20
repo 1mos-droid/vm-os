@@ -191,7 +191,7 @@ production use.
 ```sh
 scripts/validate-configs.sh
 # Download/extract the pinned Buildroot archive (see workflow), then:
-export HOSTCC="gcc -std=gnu17"
+export HOST_CFLAGS="-O2 -std=gnu17"
 export BR2_CMAKE_CANDIDATES=""
 make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/kernel-buildroot" hyperos_x86_64_defconfig
 scripts/validate-configs.sh --resolved-buildroot output/.config
