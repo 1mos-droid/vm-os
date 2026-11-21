@@ -110,7 +110,9 @@ pub fn parse_proc_meminfo(contents: &str) -> Result<RamMetrics, String> {
     for line in contents.lines() {
         let mut parts = line.split_whitespace();
         let Some(key) = parts.next() else { continue };
-        let Some(val_str) = parts.next() else { continue };
+        let Some(val_str) = parts.next() else {
+            continue;
+        };
         let Ok(val) = val_str.parse::<u64>() else {
             continue;
         };
