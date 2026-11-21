@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 if ! mountpoint -q /var/lib/hyperos; then
-    mount -t btrfs -o noatime,compress=zstd LABEL=hyperos-data /var/lib/hyperos
+    mount -t btrfs -o compress=zstd:3,noatime,commit=120 LABEL=HYPEROS_DATA /var/lib/hyperos
 fi
 # Never format or silently fall back to the root filesystem on mount failure.
 awk '$2 == "/var/lib/hyperos" && $3 == "btrfs" { found=1 } END { exit !found }' /proc/mounts
