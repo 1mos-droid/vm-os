@@ -633,3 +633,125 @@ async fn cleans_up_stale_socket_and_runs_dry_run_binary_with_sigterm() {
 
     let _ = fs::remove_dir_all(&base_dir);
 }
+
+#[tokio::test]
+async fn rejects_symlink_socket_and_enforces_state_guards_and_idempotency() {
+    let harness = TestHarness::start(HostResources {
+        mem_total_mib: 4096,
+        online_cpus: 4,
+    })
+    .await;
+
+    // Binding over a symlink at socket_path must be rejected cleanly.
+    let symlink_dir = harness.base_dir.join("symlink-test");
+    fs::create_dir_all(&symlink_dir).unwrap();
+    let real_file = symlink_dir.join("victim");
+    fs::write(&real_file, b"do-not-delete").unwrap();
+    let sym_sock = symlink_dir.join("vmm.sock");
+    std::os::unix::fs::symlink(&real_file, &sym_sock).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    assert!(BoundRpcServer::bind(&sym_sock, uid).is_err());
+    assert!(real_file.exists());
+
+    let mut client = UnixStream::connect(&harness.socket_path).await.unwrap();
+
+    // Create VM -> test stopped state guards and idempotency.
+    let created = rpc_call(
+        &mut client,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "guard-create",
+            "method": "create_vm",
+            "params": {
+                "name": "guard-vm",
+                "base_image_id": "alpine-3-21-virtio",
+                "vcpu_count": 1,
+                "ram_mib": 512,
+                "network_mode": "isolated"
+            }
+        }),
+    )
+    .await;
+    let vm_id = created["result"]["vm_id"].as_str().unwrap().to_string();
+
+    // pause_vm and set_balloon_ram while stopped must fail with -32002.
+    let pause_stopped = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-p1","method":"pause_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    assert_eq!(pause_stopped["error"]["code"], error_code::INVALID_STATE);
+
+    let balloon_stopped = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-b1","method":"set_balloon_ram","params":{"vm_id":vm_id,"ram_mib":256}}),
+    )
+    .await;
+    assert_eq!(balloon_stopped["error"]["code"], error_code::INVALID_STATE);
+
+    // stop_vm on already-stopped VM is idempotent.
+    let stop_idem = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-s1","method":"stop_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    assert_eq!(stop_idem["result"]["state"], "stopped");
+
+    // Start VM -> start_vm is idempotent; set_network_mode while running returns -32002.
+    let _ = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-st1","method":"start_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    let start_idem = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-st2","method":"start_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    assert_eq!(start_idem["result"]["state"], "running");
+
+    let net_running = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-n1","method":"set_network_mode","params":{"vm_id":vm_id,"network_mode":"nat"}}),
+    )
+    .await;
+    assert_eq!(net_running["error"]["code"], error_code::INVALID_STATE);
+
+    // Out-of-bounds balloon target (< 128 or > max ram_mib) returns -32602.
+    let balloon_low = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-bl","method":"set_balloon_ram","params":{"vm_id":vm_id,"ram_mib":64}}),
+    )
+    .await;
+    assert_eq!(balloon_low["error"]["code"], error_code::INVALID_PARAMS);
+
+    let balloon_high = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-bh","method":"set_balloon_ram","params":{"vm_id":vm_id,"ram_mib":1024}}),
+    )
+    .await;
+    assert_eq!(balloon_high["error"]["code"], error_code::INVALID_PARAMS);
+
+    // Pause twice -> idempotent; balloon while paused returns -32002.
+    let p1 = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-p2","method":"pause_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    assert_eq!(p1["result"]["state"], "paused");
+    let p2 = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-p3","method":"pause_vm","params":{"vm_id":vm_id}}),
+    )
+    .await;
+    assert_eq!(p2["result"]["state"], "paused");
+
+    let balloon_paused = rpc_call(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":"g-bp","method":"set_balloon_ram","params":{"vm_id":vm_id,"ram_mib":256}}),
+    )
+    .await;
+    assert_eq!(balloon_paused["error"]["code"], error_code::INVALID_STATE);
+
+    harness.shutdown().await;
+}

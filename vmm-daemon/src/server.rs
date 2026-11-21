@@ -9,7 +9,7 @@ use crate::rpc::{
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,13 +30,18 @@ impl BoundRpcServer {
     /// Bind the Unix domain socket at `socket_path` with mode `0600` (parent dir `0700`).
     ///
     /// Serializes startup with `flock(LOCK_EX | LOCK_NB)` and only unlinks an existing
-    /// socket file after proving no live daemon accepts connections on it.
+    /// socket file after proving it is a real Unix socket and no live daemon accepts connections.
     pub fn bind(socket_path: impl AsRef<Path>, allowed_uid: u32) -> Result<Self, String> {
         let socket_path = socket_path.as_ref().to_path_buf();
         let parent = socket_path
             .parent()
             .ok_or_else(|| "socket path must have a parent directory".to_string())?;
 
+        if let Ok(meta) = fs::symlink_metadata(parent) {
+            if meta.file_type().is_symlink() {
+                return Err("socket parent directory must not be a symlink".to_string());
+            }
+        }
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create socket parent directory: {e}"))?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
@@ -57,29 +62,44 @@ impl BoundRpcServer {
             return Err("another vmm-daemon instance already holds the startup lock".to_string());
         }
 
-        // Only unlink an existing socket after proving no live daemon owns it.
-        if socket_path.exists() {
-            match std::os::unix::net::UnixStream::connect(&socket_path) {
-                Ok(_) => {
+        // Only unlink an existing socket after proving it is a socket (never a symlink) and no live daemon owns it.
+        match fs::symlink_metadata(&socket_path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err("target Unix socket path must not be a symlink".to_string());
+                }
+                if !meta.file_type().is_socket() {
                     return Err(
-                        "an active daemon is already listening on the target Unix socket"
+                        "existing path at target Unix socket is not a Unix domain socket"
                             .to_string(),
                     );
                 }
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) =>
-                {
-                    fs::remove_file(&socket_path)
-                        .map_err(|e| format!("failed to remove stale Unix socket: {e}"))?;
+                match std::os::unix::net::UnixStream::connect(&socket_path) {
+                    Ok(_) => {
+                        return Err(
+                            "an active daemon is already listening on the target Unix socket"
+                                .to_string(),
+                        );
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                        ) =>
+                    {
+                        fs::remove_file(&socket_path)
+                            .map_err(|e| format!("failed to remove stale Unix socket: {e}"))?;
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "failed to probe existing Unix socket for liveness: {err}"
+                        ));
+                    }
                 }
-                Err(err) => {
-                    return Err(format!(
-                        "existing path at Unix socket is not a stale socket: {err}"
-                    ));
-                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!("failed to inspect target Unix socket path: {err}"));
             }
         }
 

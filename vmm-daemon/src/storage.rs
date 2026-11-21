@@ -23,12 +23,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Linux kernel `BTRFS_SUPER_MAGIC` constant (`0x9123683E`).
 const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+
+/// Monotonic counter guaranteeing unique temp filenames for concurrent atomic writes.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Internal persistent daemon policy stored alongside `metadata.json`.
 /// Never serialized into wire JSON-RPC `Vm` objects (keeping the wire schema 100% verbatim).
@@ -240,6 +244,19 @@ impl StorageManager {
             ));
         }
 
+        if self.strict_btrfs {
+            let disk_dev = fs::metadata(&disk_path).map_err(map_io_err)?.dev();
+            let inst_dev = fs::metadata(self.instances_dir())
+                .map_err(map_io_err)?
+                .dev();
+            if disk_dev != inst_dev {
+                return Err(RpcError::new(
+                    error_code::IO_FAILURE,
+                    "base image and instances must reside on the same Btrfs filesystem",
+                ));
+            }
+        }
+
         Ok(disk_path)
     }
 
@@ -387,20 +404,21 @@ impl StorageManager {
                 }
             }
 
+            fs::rename(&snap_staging, &snap_final).map_err(map_io_err)?;
+            sync_dir(&snap_parent)?;
+
             let meta_doc = SnapshotMetadataFile {
                 snapshot: snapshot.clone(),
                 vm: vm.clone(),
             };
             write_json_atomic(&snap_meta_path, &meta_doc)?;
             let _ = fs::set_permissions(&snap_meta_path, fs::Permissions::from_mode(0o444));
-
-            fs::rename(&snap_staging, &snap_final).map_err(map_io_err)?;
-            sync_dir(&snap_parent)?;
             Ok(())
         })();
 
         if res.is_err() {
             self.remove_tree_or_subvol(&snap_staging);
+            self.remove_tree_or_subvol(&snap_final);
             let _ = fs::remove_file(&snap_meta_path);
         }
         res
@@ -610,7 +628,8 @@ pub fn write_json_atomic<T: Serialize>(target: &Path, value: &T) -> Result<(), R
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| RpcError::new(error_code::IO_FAILURE, "invalid metadata filename"))?;
-    let tmp_path = parent.join(format!("{file_name}.tmp.{}", std::process::id()));
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!("{file_name}.tmp.{}.{seq}", std::process::id()));
 
     let bytes = serde_json::to_vec(value)
         .map_err(|_| RpcError::new(error_code::INTERNAL_ERROR, "failed to encode metadata"))?;
@@ -777,6 +796,36 @@ mod tests {
 
         mgr.delete_vm_overlay(&vm.vm_id).unwrap();
         assert!(!mgr.instance_disk_path(&vm.vm_id).exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rejects_symlink_escape_in_base_image_directory() {
+        let tmp = std::env::temp_dir().join(format!("hyperos-sym-{}", uuid::Uuid::new_v4()));
+        let outside = tmp.join("outside.raw");
+        let storage_root = tmp.join("storage");
+        fs::create_dir_all(&storage_root).unwrap();
+        fs::write(&outside, b"secret-host-file").unwrap();
+
+        let mgr = StorageManager::new(&storage_root, false).unwrap();
+        let img_dir = storage_root.join("base-images/evil-img");
+        fs::create_dir_all(&img_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, img_dir.join("disk.raw")).unwrap();
+        let sha = sha256_file(&outside).unwrap();
+        let manifest = BaseImageManifest {
+            image_id: "evil-img".to_string(),
+            sha256: sha,
+            format: "raw".to_string(),
+        };
+        fs::write(
+            img_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = mgr.resolve_and_validate_base_image("evil-img").unwrap_err();
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
 
         let _ = fs::remove_dir_all(&tmp);
     }
