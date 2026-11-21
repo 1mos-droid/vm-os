@@ -1,0 +1,85 @@
+name: Bug Report
+description: Report a bug in HyperOS (OS image, vmm-daemon, desktop-shell, vm-control-ui, or guest-images).
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug in HyperOS!
+        **Security notice:** If this is a security vulnerability (sandbox escape, socket auth bypass, path traversal, etc.), please close this form and report it privately via [GitHub Security Advisories](https://github.com/1mos-droid/vm-os/security/advisories/new).
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected Subsystem
+      description: Which part of HyperOS is affected?
+      options:
+        - kernel-buildroot (Linux kernel, Buildroot, initramfs, GRUB/hybrid image)
+        - vmm-daemon (JSON-RPC server, crosvm supervisor, Btrfs CoW, networking)
+        - desktop-shell (Smithay Wayland compositor, Top Context Rail, Action Deck)
+        - vm-control-ui (Zero-Script VM Studio / GUI client)
+        - guest-images (Alpine / Debian Slim base image builders)
+        - docs / scripts / CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What Happened?
+      description: Provide a clear and concise description of the bug.
+      placeholder: Describe the unexpected behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen (referencing ARCHITECTURE.md where applicable)?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: List the exact commands, RPC calls, or UI steps needed to trigger the bug.
+      value: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Include hardware, VM/nested-virt setup, boot mode, and commit SHA.
+      value: |
+        - **Commit / Release:**
+        - **Host Hardware / Hypervisor:** (e.g., laptop model or QEMU/KVM nested VM)
+        - **Host RAM:** (e.g., 4 GiB)
+        - **Boot Mode:** (UEFI / Legacy BIOS; Persistent / Stateless RAM-Only; or `--mock` / `--dry-run`)
+        - **Kernel / Rust Version:**
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Command Output
+      description: Paste any relevant kernel dmesg, runit logs, vmm-daemon output, or JSON-RPC frames. Please redact secrets or personal host paths.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have confirmed this is not a security vulnerability (security issues must use GitHub Security Advisories).
+          required: true
+        - label: I have searched existing issues to avoid duplicates.
+          required: true

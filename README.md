@@ -101,6 +101,19 @@ qemu-system-x86_64 \
 
 ---
 
-## Contributing
+## Contributing & Community
 
-Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md) before opening an issue or pull request.
+Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md) before opening an issue or pull request.
+
+To report a security vulnerability privately, see [`SECURITY.md`](SECURITY.md).
+
+---
+
+## License
+
+HyperOS source code in this repository is dual-licensed under either of:
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option. Upstream third-party components configured and assembled during OS builds (such as the Linux kernel, Buildroot, GRUB2, `runit`, and `crosvm`) retain their respective upstream licenses.

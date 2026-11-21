@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a Security Vulnerability (Private)
+    url: https://github.com/1mos-droid/vm-os/security/advisories/new
+    about: Privately report sandbox escapes, KVM/seccomp bypasses, IPC auth flaws, or storage vulnerabilities. Never open a public issue for security bugs.
+  - name: Architecture & Contract Specification
+    url: https://github.com/1mos-droid/vm-os/blob/main/ARCHITECTURE.md
+    about: Review the normative Unix socket, JSON-RPC 2.0, Btrfs storage, and RAM budget contract before proposing changes.
+  - name: Contribution Guidelines
+    url: https://github.com/1mos-droid/vm-os/blob/main/CONTRIBUTING.md
+    about: Read subsystem boundaries, security invariants, and required verification checks.
