@@ -1,0 +1,66 @@
+name: Feature Request / RFC
+description: Propose a new feature, UX improvement, or ARCHITECTURE.md contract change.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        HyperOS targets `< 350 MiB` host idle RAM on 4 GiB machines with strict isolation and contract-driven IPC defined in [`ARCHITECTURE.md`](https://github.com/1mos-droid/vm-os/blob/main/ARCHITECTURE.md). Please describe how your proposal fits these constraints.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Target Subsystem
+      options:
+        - kernel-buildroot
+        - vmm-daemon
+        - desktop-shell
+        - vm-control-ui
+        - guest-images
+        - Cross-cutting / ARCHITECTURE.md contract
+        - docs / scripts / CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem or user workflow does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the design or behavior you would like to see.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contract_impact
+    attributes:
+      label: ARCHITECTURE.md Contract Impact
+      description: Does this require changing /run/hyperos/vmm.sock, JSON-RPC 2.0 schemas/methods, or /var/lib/hyperos layout?
+      options:
+        - No contract changes (fits existing ARCHITECTURE.md verbatim)
+        - Yes — requires updating ARCHITECTURE.md and coordinating across components
+        - Unsure — needs maintainer review
+    validations:
+      required: true
+
+  - type: textarea
+    id: ram_security_impact
+    attributes:
+      label: Memory Budget & Security Impact
+      description: Estimate any impact on the < 350 MiB host idle RAM target, USB flash wear, or VM isolation boundaries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider, and why do you prefer this one?
