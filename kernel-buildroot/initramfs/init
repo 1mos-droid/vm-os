@@ -1,0 +1,220 @@
+#!/bin/sh
+# HyperOS early-boot initramfs:
+#   1. Waits for USB 3.0 UAS / NVMe / AHCI / VirtIO storage enumeration.
+#   2. Mounts read-only EROFS rootfs under a 128 MiB tmpfs OverlayFS upper layer.
+#   3. Persistent mode: auto-expands Partition 3 (HYPEROS_DATA) into trailing
+#      unallocated space on first boot and mounts Btrfs with flash-friendly options.
+#   4. Stateless RAM-Only mode: creates a dedicated ZRAM-backed Btrfs volume for
+#      /var/lib/hyperos without touching any persistent storage.
+set -eu
+
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+
+log() {
+    echo "[hyperos-initramfs] $*" >/dev/console 2>/dev/null || echo "[hyperos-initramfs] $*"
+}
+
+die() {
+    log "FATAL: $*"
+    exec /bin/sh
+}
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+MODE="persistent"
+ROOT_PARTUUID="48595045-0000-4000-8000-000000000002"
+DATA_PARTUUID="48595045-0000-4000-8000-000000000003"
+DATA_LABEL="HYPEROS_DATA"
+OVERLAY_SIZE="128M"
+
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        hyperos.mode=*)
+            MODE=${param#hyperos.mode=}
+            ;;
+        hyperos.root_partuuid=*)
+            ROOT_PARTUUID=${param#hyperos.root_partuuid=}
+            ;;
+        hyperos.data_partuuid=*)
+            DATA_PARTUUID=${param#hyperos.data_partuuid=}
+            ;;
+        hyperos.data_label=*)
+            DATA_LABEL=${param#hyperos.data_label=}
+            ;;
+        hyperos.overlay_size=*)
+            OVERLAY_SIZE=${param#hyperos.overlay_size=}
+            ;;
+    esac
+done
+
+log "Boot mode: $MODE (overlay tmpfs=${OVERLAY_SIZE})"
+
+wait_for_block_dev() {
+    # $1 = primary blkid filter (e.g. PARTUUID=...), $2 = fallback filter
+    primary=$1
+    fallback=$2
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        dev=$(blkid -t "$primary" -o device 2>/dev/null | head -n 1 || true)
+        if [ -n "$dev" ] && [ -b "$dev" ]; then
+            echo "$dev"
+            return 0
+        fi
+        if [ -n "$fallback" ]; then
+            dev=$(blkid -t "$fallback" -o device 2>/dev/null | head -n 1 || true)
+            if [ -n "$dev" ] && [ -b "$dev" ]; then
+                echo "$dev"
+                return 0
+            fi
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
+# Resolve parent disk and partition number for any block device (sda3, nvme0n1p3, vda3, mmcblk0p3).
+resolve_parent_disk() {
+    dev_path=$1
+    part_name=$(basename "$dev_path")
+    sys_part="/sys/class/block/$part_name"
+    [ -r "$sys_part/partition" ] || return 1
+    part_num=$(cat "$sys_part/partition")
+    real_part=$(readlink -f "$sys_part")
+    parent_name=$(basename "$(dirname "$real_part")")
+    [ -b "/dev/$parent_name" ] || return 1
+    echo "$parent_name $part_num"
+}
+
+maybe_expand_data_partition() {
+    data_dev=$1
+    info=$(resolve_parent_disk "$data_dev" 2>/dev/null || true)
+    [ -n "$info" ] || return 0
+
+    disk_name=$(echo "$info" | awk '{print $1}')
+    part_num=$(echo "$info" | awk '{print $2}')
+    part_name=$(basename "$data_dev")
+
+    disk_sectors=$(cat "/sys/class/block/$disk_name/size" 2>/dev/null || echo 0)
+    part_start=$(cat "/sys/class/block/$part_name/start" 2>/dev/null || echo 0)
+    part_size=$(cat "/sys/class/block/$part_name/size" 2>/dev/null || echo 0)
+    part_end=$((part_start + part_size))
+
+    # Safety check: only auto-expand if no other partition starts at or after part_end.
+    for sibling in "/sys/block/$disk_name"/*/start; do
+        [ -r "$sibling" ] || continue
+        sib_dir=$(dirname "$sibling")
+        [ "$(basename "$sib_dir")" = "$part_name" ] && continue
+        sib_start=$(cat "$sibling" 2>/dev/null || echo 0)
+        if [ "$sib_start" -ge "$part_end" ]; then
+            log "Skipping auto-expand: another partition exists after $data_dev"
+            return 0
+        fi
+    done
+
+    # Require at least 16 MiB (32768 * 512-byte sectors) of trailing free space
+    # beyond the backup GPT area (33 sectors) before modifying the partition table.
+    free_sectors=$((disk_sectors - part_end))
+    if [ "$free_sectors" -gt 32768 ]; then
+        log "Detected $((free_sectors / 2048)) MiB unallocated space after $data_dev; expanding GPT partition $part_num on /dev/$disk_name"
+        # Relocate backup GPT header to the physical end of the drive first so sfdisk sees all free sectors.
+        sfdisk --no-reread --force --relocate gpt-bak-std "/dev/$disk_name" >/dev/null 2>&1 || true
+        if printf ', +\n' | sfdisk --no-reread --force -N "$part_num" "/dev/$disk_name" >/dev/null 2>&1; then
+            partx -u "/dev/$disk_name" >/dev/null 2>&1 || true
+            return 0
+        else
+            log "WARNING: sfdisk expansion of $data_dev failed; continuing with existing partition size"
+        fi
+    fi
+    return 0
+}
+
+mount_stateless_data() {
+    # Allocate a dedicated ZRAM device for stateless /var/lib/hyperos while
+    # keeping /dev/zram0 reserved for swap (/etc/sv/zram/run).
+    [ -r /sys/class/zram-control/hot_add ] || die "zram-control unavailable for stateless mode"
+    zram_id=$(cat /sys/class/zram-control/hot_add)
+    if [ "$zram_id" = "0" ]; then
+        zram_id=$(cat /sys/class/zram-control/hot_add)
+    fi
+    zram_dev="/dev/zram$zram_id"
+    zram_sys="/sys/block/zram$zram_id"
+
+    # Wait briefly for devtmpfs node creation.
+    wait_i=0
+    while [ ! -b "$zram_dev" ] && [ "$wait_i" -lt 10 ]; do
+        wait_i=$((wait_i + 1))
+        sleep 1
+    done
+    [ -b "$zram_dev" ] || die "stateless ZRAM device $zram_dev did not appear"
+
+    ram_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+    # Allocate 40% of total RAM as virtual Btrfs capacity (thinly allocated in ZRAM,
+    # clamped between 256 MiB and 2048 MiB to stay well within 4 GiB host budgets).
+    size_bytes=$((ram_kib * 1024 * 40 / 100))
+    min_bytes=$((256 * 1024 * 1024))
+    max_bytes=$((2048 * 1024 * 1024))
+    [ "$size_bytes" -lt "$min_bytes" ] && size_bytes=$min_bytes
+    [ "$size_bytes" -gt "$max_bytes" ] && size_bytes=$max_bytes
+
+    echo zstd > "$zram_sys/comp_algorithm"
+    echo "$size_bytes" > "$zram_sys/disksize"
+
+    log "Formatting stateless ZRAM Btrfs volume on $zram_dev ($((size_bytes / 1048576)) MiB virtual)"
+    mkfs.btrfs -f -L HYPEROS_STATELESS "$zram_dev" >/dev/null 2>&1 || die "mkfs.btrfs failed on $zram_dev"
+    mount -t btrfs -o compress=zstd:3,noatime "$zram_dev" /newroot/var/lib/hyperos || die "failed to mount stateless Btrfs"
+}
+
+mount_persistent_data() {
+    data_dev=$(wait_for_block_dev "LABEL=$DATA_LABEL" "PARTUUID=$DATA_PARTUUID") \
+        || die "persistent data partition (LABEL=$DATA_LABEL) not found"
+
+    maybe_expand_data_partition "$data_dev"
+
+    log "Mounting persistent Btrfs data partition $data_dev at /var/lib/hyperos"
+    mount -t btrfs -o compress=zstd:3,noatime,commit=120 "$data_dev" /newroot/var/lib/hyperos \
+        || die "failed to mount $data_dev as Btrfs"
+
+    # Idempotently grow Btrfs to fill the (potentially expanded) partition.
+    btrfs filesystem resize max /newroot/var/lib/hyperos >/dev/null 2>&1 || true
+}
+
+# 1. Locate and mount the read-only EROFS root filesystem.
+root_dev=$(wait_for_block_dev "PARTUUID=$ROOT_PARTUUID" "TYPE=erofs") \
+    || die "read-only EROFS root partition (PARTUUID=$ROOT_PARTUUID) not found"
+
+mkdir -p /mnt/lower /mnt/rw /newroot
+log "Mounting read-only EROFS rootfs $root_dev"
+mount -t erofs -o ro "$root_dev" /mnt/lower || die "failed to mount EROFS root $root_dev"
+
+# 2. Mount 128 MiB tmpfs OverlayFS upper layer so host logs/tmp writes never wear USB flash.
+mount -t tmpfs -o "size=${OVERLAY_SIZE},mode=0755" tmpfs /mnt/rw || die "failed to mount OverlayFS tmpfs"
+mkdir -p /mnt/rw/upper /mnt/rw/work
+mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/rw/upper,workdir=/mnt/rw/work /newroot \
+    || die "failed to mount root OverlayFS"
+
+# 3. Mount /var/lib/hyperos according to boot mode.
+mkdir -p /newroot/var/lib/hyperos
+case "$MODE" in
+    stateless)
+        mount_stateless_data
+        ;;
+    persistent|*)
+        MODE="persistent"
+        mount_persistent_data
+        ;;
+esac
+
+mkdir -p /newroot/var/lib/hyperos/base-images /newroot/var/lib/hyperos/instances
+chmod 0700 /newroot/var/lib/hyperos /newroot/var/lib/hyperos/base-images /newroot/var/lib/hyperos/instances
+printf '%s\n' "$MODE" > /newroot/etc/hyperos-boot-mode
+
+# 4. Hand off /dev and switch_root into runit (/sbin/init).
+mkdir -p /newroot/dev /newroot/proc /newroot/sys
+mount --move /dev /newroot/dev
+umount /proc
+umount /sys
+
+exec switch_root /newroot /sbin/init

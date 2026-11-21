@@ -44,25 +44,31 @@ jobs:
         run: |
           make -C buildroot O="$GITHUB_WORKSPACE/output" BR2_EXTERNAL="$GITHUB_WORKSPACE/kernel-buildroot" hyperos_x86_64_defconfig
           scripts/validate-configs.sh --resolved-buildroot output/.config
-      - name: Build kernel and bootable root filesystem
+      - name: Build kernel and hybrid bootable image
         run: make -C buildroot O="$GITHUB_WORKSPACE/output" -j2
-      - name: Validate resolved kernel and image outputs
+      - name: Validate resolved kernel and hybrid image outputs
         run: |
           scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
+          scripts/validate-configs.sh --image output/images/hyperos.img
           test -s output/images/hyperos.img
           test -s output/images/bzImage
-          test -s output/images/rootfs.ext2
+          test -s output/images/rootfs.erofs
+          test -s output/images/initramfs.cpio.zst
+          test -s output/images/efi-part.vfat
+          test -s output/images/efi-part/EFI/BOOT/BOOTX64.EFI
           test -x output/target/sbin/runit
           test "$(readlink output/target/sbin/init)" = runit
           test "$(readlink output/target/bin/sh)" = dash
       - uses: actions/upload-artifact@v4
         with:
-          name: hyperos-x86_64-bios-${{ github.sha }}
+          name: hyperos-x86_64-hybrid-${{ github.sha }}
           if-no-files-found: error
           compression-level: 1
           path: |
             output/images/hyperos.img
             output/images/bzImage
-            output/images/rootfs.ext2
+            output/images/rootfs.erofs
+            output/images/initramfs.cpio.zst
+            output/images/efi-part/EFI/BOOT/BOOTX64.EFI
             output/.config
             output/build/linux-6.12.20/.config
