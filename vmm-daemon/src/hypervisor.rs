@@ -351,6 +351,13 @@ impl HypervisorController for CrosvmController {
                 unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
+                for _ in 0..10 {
+                    let still_tracked = self.children.lock().unwrap().contains_key(&vm_id);
+                    if !still_tracked {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
             Ok(())
         })
@@ -608,5 +615,30 @@ mod tests {
                 "/run/hyperos/c.sock"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn mock_hypervisor_records_snapshot_runtime_control_call() {
+        let hv = MockHypervisor::new();
+        hv.snapshot_runtime(
+            "b6f51eed-8dc7-47f6-a8e7-81b6ae783a21",
+            Path::new("/run/hyperos/vms/b6f51eed/crosvm.sock"),
+            Path::new("/var/lib/hyperos/instances/b6f51eed/snapshots/snap1"),
+        )
+        .await
+        .unwrap();
+
+        let events = hv.events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            MockHypervisorEvent::Snapshot { args, .. }
+                if args == &vec![
+                    "snapshot",
+                    "take",
+                    "/var/lib/hyperos/instances/b6f51eed/snapshots/snap1",
+                    "/run/hyperos/vms/b6f51eed/crosvm.sock",
+                ]
+        ));
     }
 }

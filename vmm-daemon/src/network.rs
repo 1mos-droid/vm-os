@@ -93,6 +93,14 @@ impl LinuxNetworkController {
         }
     }
 
+    fn is_valid_ifname(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 15
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'@'))
+    }
+
     fn detect_uplink() -> Result<String, RpcError> {
         let output = Command::new("ip")
             .args(["route", "show", "default"])
@@ -115,7 +123,7 @@ impl LinuxNetworkController {
         for line in stdout.lines() {
             let tokens: Vec<&str> = line.split_whitespace().collect();
             for pair in tokens.windows(2) {
-                if pair[0] == "dev" && !pair[1].is_empty() {
+                if pair[0] == "dev" && Self::is_valid_ifname(pair[1]) {
                     return Ok(pair[1].to_string());
                 }
             }
@@ -176,6 +184,46 @@ impl LinuxNetworkController {
     }
 }
 
+/// Generate an isolated `nftables` NAT ruleset allowing outbound uplink masquerade
+/// while blocking inter-VM traffic (`10.200.0.0/15`) and unsolicited inbound connections.
+pub fn build_nat_nft_ruleset(alloc: &NetworkAllocation, uplink: &str) -> String {
+    let subnet = format!("10.200.{}.0/30", alloc.subnet_slot);
+    format!(
+        "table inet {tbl} {{\n\
+           chain forward {{\n\
+             type filter hook forward priority 0; policy accept;\n\
+             iifname \"{tap}\" oifname \"{uplink}\" ip saddr {subnet} ip daddr != 10.200.0.0/15 accept\n\
+             iifname \"{uplink}\" oifname \"{tap}\" ct state established,related accept\n\
+             iifname \"{tap}\" drop\n\
+             oifname \"{tap}\" drop\n\
+           }}\n\
+           chain postrouting {{\n\
+             type nat hook postrouting priority srcnat; policy accept;\n\
+             oifname \"{uplink}\" ip saddr {subnet} masquerade\n\
+           }}\n\
+         }}\n",
+        tbl = alloc.nft_table,
+        tap = alloc.tap_name,
+        uplink = uplink,
+        subnet = subnet,
+    )
+}
+
+/// Generate an `nftables` host-only ruleset blocking all forwarding to/from the VM bridge.
+pub fn build_host_only_nft_ruleset(alloc: &NetworkAllocation, bridge: &str) -> String {
+    format!(
+        "table inet {tbl} {{\n\
+           chain forward {{\n\
+             type filter hook forward priority 0; policy accept;\n\
+             iifname \"{br}\" drop\n\
+             oifname \"{br}\" drop\n\
+           }}\n\
+         }}\n",
+        tbl = alloc.nft_table,
+        br = bridge,
+    )
+}
+
 impl NetworkController for LinuxNetworkController {
     fn setup(&self, vm_id: &str, mode: NetworkMode) -> Result<Option<NetworkAllocation>, RpcError> {
         if mode == NetworkMode::Isolated {
@@ -204,26 +252,7 @@ impl NetworkController for LinuxNetworkController {
                     Self::run_ip(&["link", "set", "dev", &alloc.tap_name, "up"])?;
                     let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1\n");
 
-                    let subnet = format!("10.200.{}.0/30", alloc.subnet_slot);
-                    let nft_rules = format!(
-                        "table inet {tbl} {{\n\
-                           chain forward {{\n\
-                             type filter hook forward priority 0; policy accept;\n\
-                             iifname \"{tap}\" oifname \"{uplink}\" ip saddr {subnet} ip daddr != 10.200.0.0/15 accept\n\
-                             iifname \"{uplink}\" oifname \"{tap}\" ct state established,related accept\n\
-                             iifname \"{tap}\" drop\n\
-                             oifname \"{tap}\" drop\n\
-                           }}\n\
-                           chain postrouting {{\n\
-                             type nat hook postrouting priority srcnat; policy accept;\n\
-                             oifname \"{uplink}\" ip saddr {subnet} masquerade\n\
-                           }}\n\
-                         }}\n",
-                        tbl = alloc.nft_table,
-                        tap = alloc.tap_name,
-                        uplink = uplink,
-                        subnet = subnet,
-                    );
+                    let nft_rules = build_nat_nft_ruleset(&alloc, uplink);
                     Self::apply_nft_ruleset(&nft_rules)?;
                 }
                 NetworkMode::HostOnly => {
@@ -234,17 +263,7 @@ impl NetworkController for LinuxNetworkController {
                     Self::run_ip(&["link", "set", "dev", &alloc.tap_name, "up"])?;
                     Self::run_ip(&["link", "set", "dev", bridge, "up"])?;
 
-                    let nft_rules = format!(
-                        "table inet {tbl} {{\n\
-                           chain forward {{\n\
-                             type filter hook forward priority 0; policy accept;\n\
-                             iifname \"{br}\" drop\n\
-                             oifname \"{br}\" drop\n\
-                           }}\n\
-                         }}\n",
-                        tbl = alloc.nft_table,
-                        br = bridge,
-                    );
+                    let nft_rules = build_host_only_nft_ruleset(&alloc, bridge);
                     Self::apply_nft_ruleset(&nft_rules)?;
                 }
                 NetworkMode::Isolated => {}
@@ -362,5 +381,36 @@ mod tests {
         net.teardown(&host_only);
         assert!(net.active_allocations().is_empty());
         assert_eq!(net.torn_down_allocations().len(), 2);
+    }
+
+    #[test]
+    fn generates_strict_nftables_rulesets_and_validates_ifnames() {
+        let nat_alloc =
+            build_allocation("b6f51eed-8dc7-47f6-a8e7-81b6ae783a21", NetworkMode::Nat, 7);
+        let nat_rules = build_nat_nft_ruleset(&nat_alloc, "eth0");
+        assert!(nat_rules.contains("table inet hyperos_b6f51eed"));
+        assert!(nat_rules.contains("ip daddr != 10.200.0.0/15 accept"));
+        assert!(nat_rules.contains("ct state established,related accept"));
+        assert!(nat_rules.contains("oifname \"eth0\" ip saddr 10.200.7.0/30 masquerade"));
+        assert!(nat_rules.contains("iifname \"hvmtapb6f51eed\" drop"));
+
+        let ho_alloc = build_allocation(
+            "4f281e57-3717-40fe-9d90-025f37962bbd",
+            NetworkMode::HostOnly,
+            8,
+        );
+        let ho_rules =
+            build_host_only_nft_ruleset(&ho_alloc, ho_alloc.bridge_name.as_deref().unwrap());
+        assert!(ho_rules.contains("iifname \"hvmbr4f281e57\" drop"));
+        assert!(ho_rules.contains("oifname \"hvmbr4f281e57\" drop"));
+        assert!(!ho_rules.contains("masquerade"));
+
+        assert!(LinuxNetworkController::is_valid_ifname("eth0"));
+        assert!(LinuxNetworkController::is_valid_ifname("enp0s3"));
+        assert!(!LinuxNetworkController::is_valid_ifname(""));
+        assert!(!LinuxNetworkController::is_valid_ifname("eth0;rm -rf /"));
+        assert!(!LinuxNetworkController::is_valid_ifname(
+            "interface_name_too_long"
+        ));
     }
 }

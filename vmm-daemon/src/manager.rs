@@ -127,6 +127,28 @@ impl VmManager {
         self.runtime_vm_dir(vm_id).join("crosvm.sock")
     }
 
+    /// Verify `/proc/<pid>/comm` (or cmdline) belongs to `crosvm` before signaling an orphaned PID
+    /// during startup reconciliation so PID reuse across host reboots cannot hit unrelated processes.
+    fn process_looks_like_crosvm(pid: u32) -> bool {
+        if let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) {
+            if comm.trim() == "crosvm" {
+                return true;
+            }
+        }
+        if let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) {
+            if let Some(arg0) = cmdline.split(|&b| b == 0).next() {
+                if let Ok(s) = std::str::from_utf8(arg0) {
+                    return Path::new(s)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n == "crosvm")
+                        .unwrap_or(false);
+                }
+            }
+        }
+        false
+    }
+
     /// Reconcile persisted VM metadata on daemon startup before accepting client mutations.
     /// Per `ARCHITECTURE.md`: never report a persisted `running`/`paused` state without a live VM.
     fn reconcile_on_startup(
@@ -136,19 +158,35 @@ impl VmManager {
     ) -> Result<BTreeMap<String, ManagedVm>, String> {
         let persisted = storage.load_all_vms()?;
         let mut map = BTreeMap::new();
+        let mut used_cids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         for mut rec in persisted {
+            let mut policy_dirty = false;
+
+            // Ensure every VM holds a unique valid vsock CID (>= 3).
+            if rec.policy.vsock_cid < 3 || !used_cids.insert(rec.policy.vsock_cid) {
+                let fresh_cid = (3u32..=65_535)
+                    .find(|cid| !used_cids.contains(cid))
+                    .unwrap_or(3);
+                used_cids.insert(fresh_cid);
+                rec.policy.vsock_cid = fresh_cid;
+                policy_dirty = true;
+            }
+
             if matches!(rec.vm.state, VmState::Running | VmState::Paused) {
                 if !dry_run {
                     if let Some(pid) = rec.policy.last_pid {
-                        // Reap/terminate any orphaned crosvm process from a previous daemon instance.
-                        unsafe {
-                            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                        // Only signal orphaned processes verified to be crosvm.
+                        if Self::process_looks_like_crosvm(pid) {
+                            unsafe {
+                                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                            }
                         }
                     }
                 }
                 rec.vm.state = VmState::Stopped;
                 rec.policy.last_pid = None;
+                policy_dirty = true;
                 let rt_dir = runtime_root.join("vms").join(&rec.vm.vm_id);
                 if rt_dir.exists() {
                     let _ = fs::remove_dir_all(&rt_dir);
@@ -159,6 +197,9 @@ impl VmManager {
                 storage
                     .save_vm_metadata(&rec.vm)
                     .map_err(|e| format!("failed to persist reconciled VM metadata: {e}"))?;
+            }
+
+            if policy_dirty {
                 storage
                     .save_vm_policy(&rec.vm.vm_id, &rec.policy)
                     .map_err(|e| format!("failed to persist reconciled VM policy: {e}"))?;
@@ -339,8 +380,13 @@ impl VmManager {
                 let entry = map
                     .get_mut(vm_id)
                     .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
-                entry.vm.state = VmState::Running;
-                self.storage.save_vm_metadata(&entry.vm)?;
+                let mut next_vm = entry.vm.clone();
+                next_vm.state = VmState::Running;
+                if let Err(err) = self.storage.save_vm_metadata(&next_vm) {
+                    let _ = self.hypervisor.suspend_vm(vm_id, &control_sock).await;
+                    return Err(err);
+                }
+                entry.vm = next_vm;
                 Ok(entry.vm.clone())
             }
             VmState::Stopped | VmState::Failed => {
@@ -381,7 +427,7 @@ impl VmManager {
                     vcpu_count: current_vm.vcpu_count,
                     ram_mib: current_vm.ram_mib,
                     disk_path,
-                    control_socket,
+                    control_socket: control_socket.clone(),
                     jail_pivot_root: jail_dir,
                     vsock_cid: current_policy.vsock_cid,
                     tap_name: net_alloc.as_ref().map(|a| a.tap_name.clone()),
@@ -401,20 +447,44 @@ impl VmManager {
                     }
                 };
 
-                let updated_vm = {
+                let commit_res = {
                     let mut map = self.vms.write().await;
                     let entry = map
                         .get_mut(vm_id)
                         .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
-                    entry.vm.state = VmState::Running;
+                    let mut next_vm = entry.vm.clone();
+                    next_vm.state = VmState::Running;
                     // Per ARCHITECTURE.md: Balloon target resets to maximum at each cold start.
-                    entry.vm.balloon_target_mib = entry.vm.ram_mib;
-                    entry.policy.last_pid = spawned.pid;
-                    entry.network = net_alloc;
-                    entry.runtime_dir = Some(rt_dir);
-                    self.storage.save_vm_metadata(&entry.vm)?;
-                    self.storage.save_vm_policy(vm_id, &entry.policy)?;
-                    entry.vm.clone()
+                    next_vm.balloon_target_mib = next_vm.ram_mib;
+                    let mut next_policy = entry.policy.clone();
+                    next_policy.last_pid = spawned.pid;
+
+                    match self
+                        .storage
+                        .save_vm_metadata(&next_vm)
+                        .and_then(|_| self.storage.save_vm_policy(vm_id, &next_policy))
+                    {
+                        Ok(()) => {
+                            entry.vm = next_vm.clone();
+                            entry.policy = next_policy;
+                            entry.network = net_alloc.clone();
+                            entry.runtime_dir = Some(rt_dir.clone());
+                            Ok(next_vm)
+                        }
+                        Err(err) => Err(err),
+                    }
+                };
+
+                let updated_vm = match commit_res {
+                    Ok(vm) => vm,
+                    Err(err) => {
+                        let _ = self.hypervisor.stop_vm(vm_id, &control_socket).await;
+                        if let Some(ref alloc) = net_alloc {
+                            self.network.teardown(alloc);
+                        }
+                        let _ = fs::remove_dir_all(&rt_dir);
+                        return Err(err);
+                    }
                 };
 
                 // Spawn async child-exit supervisor to detect unexpected crosvm crashes.
@@ -485,8 +555,13 @@ impl VmManager {
                 let entry = map
                     .get_mut(vm_id)
                     .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
-                entry.vm.state = VmState::Paused;
-                self.storage.save_vm_metadata(&entry.vm)?;
+                let mut next_vm = entry.vm.clone();
+                next_vm.state = VmState::Paused;
+                if let Err(err) = self.storage.save_vm_metadata(&next_vm) {
+                    let _ = self.hypervisor.resume_vm(vm_id, &control_sock).await;
+                    return Err(err);
+                }
+                entry.vm = next_vm;
                 Ok(entry.vm.clone())
             }
             VmState::Stopped | VmState::Failed => Err(RpcError::new(
@@ -609,8 +684,10 @@ impl VmManager {
         let entry = map
             .get_mut(vm_id)
             .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
-        entry.vm.balloon_target_mib = ram_mib;
-        self.storage.save_vm_metadata(&entry.vm)?;
+        let mut next_vm = entry.vm.clone();
+        next_vm.balloon_target_mib = ram_mib;
+        self.storage.save_vm_metadata(&next_vm)?;
+        entry.vm = next_vm;
         Ok(entry.vm.clone())
     }
 
@@ -638,8 +715,10 @@ impl VmManager {
             ));
         }
 
-        entry.vm.network_mode = network_mode;
-        self.storage.save_vm_metadata(&entry.vm)?;
+        let mut next_vm = entry.vm.clone();
+        next_vm.network_mode = network_mode;
+        self.storage.save_vm_metadata(&next_vm)?;
+        entry.vm = next_vm;
         Ok(entry.vm.clone())
     }
 
