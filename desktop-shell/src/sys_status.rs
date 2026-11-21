@@ -1,4 +1,8 @@
 //! Low-overhead system status readers for the Top Context Rail (Host RAM, ZRAM, Battery, Wi-Fi, Audio).
+//!
+//! In live mode (`mock_mode = false`), probes real Linux sysfs/procfs hardware capabilities
+//! so Wi-Fi and Audio controls honestly report when the monolithic HyperOS kernel profile
+//! omits WLAN or ALSA sound support.
 
 use std::fs;
 use std::path::Path;
@@ -13,8 +17,10 @@ pub struct SystemStatus {
     pub zram_active: bool,
     pub battery_percent: Option<u8>,
     pub battery_charging: bool,
+    pub wifi_available: bool,
     pub wifi_enabled: bool,
     pub wifi_label: String,
+    pub audio_available: bool,
     pub audio_muted: bool,
     pub audio_volume_pct: u8,
     pub display_scale_pct: u16,
@@ -27,12 +33,33 @@ impl SystemStatus {
         let (zram_orig_mib, zram_compr_mib, zram_active) = read_zram_mib(mock_mode);
         let (battery_percent, battery_charging) = read_battery(mock_mode);
 
-        let wifi_enabled = prev.map(|p| p.wifi_enabled).unwrap_or(true);
-        let audio_muted = prev.map(|p| p.audio_muted).unwrap_or(false);
+        let wifi_available = if mock_mode {
+            true
+        } else {
+            detect_wifi_available()
+        };
+        let audio_available = if mock_mode {
+            true
+        } else {
+            detect_audio_available()
+        };
+
+        let wifi_enabled = if !wifi_available {
+            false
+        } else {
+            prev.map(|p| p.wifi_enabled).unwrap_or(true)
+        };
+        let audio_muted = if !audio_available {
+            true
+        } else {
+            prev.map(|p| p.audio_muted).unwrap_or(false)
+        };
         let audio_volume_pct = prev.map(|p| p.audio_volume_pct).unwrap_or(72);
         let display_scale_pct = prev.map(|p| p.display_scale_pct).unwrap_or(100);
         let global_offline_shield = prev.map(|p| p.global_offline_shield).unwrap_or(false);
-        let wifi_label = if global_offline_shield || !wifi_enabled {
+        let wifi_label = if !wifi_available {
+            "Wi-Fi N/A".to_string()
+        } else if global_offline_shield || !wifi_enabled {
             "Offline".to_string()
         } else {
             "Wi-Fi".to_string()
@@ -46,8 +73,10 @@ impl SystemStatus {
             zram_active,
             battery_percent,
             battery_charging,
+            wifi_available,
             wifi_enabled,
             wifi_label,
+            audio_available,
             audio_muted,
             audio_volume_pct,
             display_scale_pct,
@@ -83,12 +112,42 @@ impl SystemStatus {
     }
 
     pub fn audio_label(&self) -> String {
-        if self.audio_muted {
+        if !self.audio_available {
+            "Audio N/A".to_string()
+        } else if self.audio_muted {
             "Muted".to_string()
         } else {
             format!("Vol {}%", self.audio_volume_pct)
         }
     }
+}
+
+/// Detect whether the running Linux kernel exposes any IEEE 802.11 wireless interface.
+pub fn detect_wifi_available() -> bool {
+    if let Ok(entries) = fs::read_dir("/sys/class/ieee80211") {
+        if entries.flatten().next().is_some() {
+            return true;
+        }
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            if entry.path().join("wireless").is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Detect whether the running Linux kernel exposes any ALSA sound card.
+pub fn detect_audio_available() -> bool {
+    let Ok(cards) = fs::read_to_string("/proc/asound/cards") else {
+        return false;
+    };
+    cards.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('[')
+    })
 }
 
 fn read_ram_mib() -> Option<(u64, u64)> {
@@ -165,9 +224,23 @@ mod tests {
     fn system_status_mock_fallback_formats_clean_rail_labels() {
         let st = SystemStatus::read(true, None);
         assert!(st.ram_total_mib > 0);
+        assert!(st.wifi_available);
+        assert!(st.audio_available);
         assert!(st.compact_memory_label().contains("RAM "));
         assert!(st.compact_memory_label().contains("ZRAM"));
         assert!(!st.battery_label().is_empty());
         assert_eq!(st.audio_label(), "Vol 72%");
+    }
+
+    #[test]
+    fn unavailable_capabilities_render_explicit_na_labels() {
+        let mut st = SystemStatus::read(true, None);
+        st.wifi_available = false;
+        st.wifi_enabled = false;
+        st.wifi_label = "Wi-Fi N/A".to_string();
+        st.audio_available = false;
+        st.audio_muted = true;
+        assert_eq!(st.wifi_label, "Wi-Fi N/A");
+        assert_eq!(st.audio_label(), "Audio N/A");
     }
 }

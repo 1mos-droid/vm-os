@@ -24,6 +24,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate source configuration
         run: scripts/validate-configs.sh
+      - name: Install Rust toolchain (musl target for vmm-daemon)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -31,7 +35,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: dl
-          key: buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/**') }}
+          key: buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/**', 'vmm-daemon/Cargo.lock') }}
           restore-keys: |
             buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-
       - name: Fetch pinned Buildroot
@@ -46,7 +50,7 @@ jobs:
           scripts/validate-configs.sh --resolved-buildroot output/.config
       - name: Build kernel and hybrid bootable image
         run: make -C buildroot O="$GITHUB_WORKSPACE/output" -j2
-      - name: Validate resolved kernel and hybrid image outputs
+      - name: Validate resolved kernel, target binaries, and hybrid image outputs
         run: |
           scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
           scripts/validate-configs.sh --image output/images/hyperos.img
@@ -56,9 +60,53 @@ jobs:
           test -s output/images/initramfs.cpio.zst
           test -s output/images/efi-part.vfat
           test -s output/images/efi-part/EFI/BOOT/BOOTX64.EFI
+          test -s output/target/boot/bzImage
           test -x output/target/sbin/runit
+          test -x output/target/usr/bin/vmm-daemon
+          test -x output/target/usr/sbin/nft || test -x output/target/sbin/nft
+          test -x output/target/sbin/ip || test -x output/target/usr/sbin/ip
           test "$(readlink output/target/sbin/init)" = runit
           test "$(readlink output/target/bin/sh)" = dash
+      - name: Smoke-test packaged target vmm-daemon (list_vms over AF_UNIX)
+        run: |
+          python3 - <<'PY'
+          import json, os, signal, socket, subprocess, tempfile, time
+          from pathlib import Path
+
+          with tempfile.TemporaryDirectory() as td:
+              sock_path = Path(td) / 'vmm.sock'
+              storage_dir = Path(td) / 'storage'
+              proc = subprocess.Popen([
+                  'output/target/usr/bin/vmm-daemon',
+                  '--dry-run',
+                  '--socket', str(sock_path),
+                  '--storage-dir', str(storage_dir),
+              ])
+              try:
+                  connected = False
+                  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                  for _ in range(40):
+                      try:
+                          s.connect(str(sock_path))
+                          connected = True
+                          break
+                      except OSError:
+                          time.sleep(0.05)
+                  assert connected, 'packaged vmm-daemon failed to bind Unix socket'
+                  s.sendall(b'{"jsonrpc":"2.0","id":"ci-list-1","method":"list_vms","params":{}}\n')
+                  resp = b''
+                  while not resp.endswith(b'\n'):
+                      chunk = s.recv(4096)
+                      assert chunk, 'EOF before JSON-RPC response'
+                      resp += chunk
+                  s.close()
+                  payload = json.loads(resp.decode('utf-8'))
+                  assert payload == {'jsonrpc': '2.0', 'id': 'ci-list-1', 'result': {'vms': []}}, payload
+                  print('PASS: packaged musl /usr/bin/vmm-daemon answered list_vms:', payload)
+              finally:
+                  proc.send_signal(signal.SIGTERM)
+                  assert proc.wait(timeout=5) == 0
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: hyperos-x86_64-hybrid-${{ github.sha }}
@@ -70,5 +118,6 @@ jobs:
             output/images/rootfs.erofs
             output/images/initramfs.cpio.zst
             output/images/efi-part/EFI/BOOT/BOOTX64.EFI
+            output/target/usr/bin/vmm-daemon
             output/.config
             output/build/linux-6.12.20/.config
