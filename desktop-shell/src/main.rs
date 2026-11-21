@@ -438,6 +438,13 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
         ui.on_toggle_wifi(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = rt.borrow_mut();
+                if !st.sys.wifi_available {
+                    ui.set_rail_toast(SharedString::from(
+                        "Wi-Fi unavailable in current kernel profile (wired/isolated host)",
+                    ));
+                    sync_shell_ui(&ui, &mut st);
+                    return;
+                }
                 st.sys.wifi_enabled = !st.sys.wifi_enabled;
                 sync_shell_ui(&ui, &mut st);
             }
@@ -450,6 +457,13 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
         ui.on_toggle_audio_mute(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = rt.borrow_mut();
+                if !st.sys.audio_available {
+                    ui.set_rail_toast(SharedString::from(
+                        "Local audio unavailable in current kernel profile",
+                    ));
+                    sync_shell_ui(&ui, &mut st);
+                    return;
+                }
                 st.sys.audio_muted = !st.sys.audio_muted;
                 sync_shell_ui(&ui, &mut st);
             }

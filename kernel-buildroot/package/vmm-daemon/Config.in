@@ -1,0 +1,9 @@
+config BR2_PACKAGE_VMM_DAEMON
+	bool "vmm-daemon"
+	depends on BR2_x86_64
+	help
+	  HyperOS privileged VMM control-plane daemon supervising crosvm
+	  virtual machines over /run/hyperos/vmm.sock (JSON-RPC 2.0).
+
+	  Builds the local Rust crate in vmm-daemon/ against the target
+	  x86_64-unknown-linux-musl toolchain and installs /usr/bin/vmm-daemon.

@@ -122,8 +122,9 @@ while [ -s "$QUEUE" ]; do
 
         cp -p "$src" "$dst"
 
-        # Extract ELF dynamic linker (PT_INTERP) if present.
-        interp=$("$READELF" -l "$src" 2>/dev/null | sed -n 's/.*program interpreter: \[\([^]]*\)\].*/\1/p' | head -n 1 || true)
+        # Extract ELF dynamic linker (PT_INTERP) from GNU readelf:
+        #   [Requesting program interpreter: /lib/ld-musl-x86_64.so.1]
+        interp=$("$READELF" -l "$src" 2>/dev/null | sed -n 's/.*\[Requesting program interpreter: \([^]]*\)\].*/\1/p' | head -n 1 || true)
         if [ -n "$interp" ]; then
             enqueue_rel "${interp#/}"
         fi
@@ -139,6 +140,36 @@ while [ -s "$QUEUE" ]; do
         done
     done < "$BATCH"
     rm -f "$BATCH"
+done
+
+# Fail-closed audit: every staged ELF executable must have its PT_INTERP loader
+# and every DT_NEEDED shared library present inside the staged initramfs.
+for bindir in bin sbin usr/bin usr/sbin; do
+    [ -d "$STAGE/$bindir" ] || continue
+    for bin in "$STAGE/$bindir"/*; do
+        [ -f "$bin" ] && [ ! -L "$bin" ] || continue
+        interp=$("$READELF" -l "$bin" 2>/dev/null | sed -n 's/.*\[Requesting program interpreter: \([^]]*\)\].*/\1/p' | head -n 1 || true)
+        if [ -n "$interp" ]; then
+            interp_rel=${interp#/}
+            if [ ! -e "$STAGE/$interp_rel" ] && [ ! -L "$STAGE/$interp_rel" ]; then
+                echo "FAIL: staged binary ${bin#"$STAGE/"} requires missing ELF interpreter $interp" >&2
+                exit 1
+            fi
+        fi
+        for lib in $("$READELF" -d "$bin" 2>/dev/null | sed -n 's/.*(NEEDED).*Shared library: \[\([^]]*\)\].*/\1/p'); do
+            found_lib=0
+            for libdir in lib usr/lib lib64 usr/lib64 lib/x86_64-linux-gnu usr/lib/x86_64-linux-gnu; do
+                if [ -e "$STAGE/$libdir/$lib" ] || [ -L "$STAGE/$libdir/$lib" ]; then
+                    found_lib=1
+                    break
+                fi
+            done
+            if [ "$found_lib" -ne 1 ]; then
+                echo "FAIL: staged binary ${bin#"$STAGE/"} requires missing shared library $lib" >&2
+                exit 1
+            fi
+        done
+    done
 done
 
 # Populate BusyBox applet symlinks where dedicated binaries were not already staged.
