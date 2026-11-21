@@ -1,1 +1,3 @@
 source "$BR2_EXTERNAL_HYPEROS_PATH/package/runit/Config.in"
+source "$BR2_EXTERNAL_HYPEROS_PATH/package/vmm-daemon/Config.in"
+source "$BR2_EXTERNAL_HYPEROS_PATH/package/crosvm/Config.in"

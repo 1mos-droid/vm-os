@@ -328,6 +328,13 @@ fn wire_ui(
         ui.set_wizard_vcpu_count(first.recommended_vcpus as i32);
     }
 
+    let settings = GuidedSettings::for_runtime(mock_mode);
+    ui.set_settings_wifi_enabled(settings.wifi_enabled);
+    ui.set_settings_wifi_name(SharedString::from(settings.wifi_network_name.as_str()));
+    ui.set_settings_sound_volume(settings.sound_volume_pct as i32);
+    ui.set_settings_sound_muted(settings.sound_muted);
+    ui.set_settings_guest_audio(settings.guest_audio_forwarding);
+
     let state = Rc::new(RefCell::new(AppState {
         backend,
         mock_mode,
@@ -336,7 +343,7 @@ fn wire_ui(
         policies: HashMap::new(),
         checkpoints: Vec::new(),
         cached_vms: Vec::new(),
-        settings: GuidedSettings::default(),
+        settings,
     }));
 
     {
@@ -762,16 +769,36 @@ fn wire_ui(
         ui.on_settings_changed(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state.borrow_mut();
-                st.settings.wifi_enabled = ui.get_settings_wifi_enabled();
+                let mut note = None;
+                let wanted_wifi = ui.get_settings_wifi_enabled();
+                if wanted_wifi && !st.settings.wifi_available {
+                    ui.set_settings_wifi_enabled(false);
+                    note = Some("Wi-Fi unavailable in current kernel profile.");
+                } else {
+                    st.settings.wifi_enabled = wanted_wifi;
+                }
                 st.settings.airplane_isolation = ui.get_settings_airplane_isolation();
-                st.settings.sound_volume_pct = ui.get_settings_sound_volume().clamp(0, 100) as u8;
-                st.settings.sound_muted = ui.get_settings_sound_muted();
-                st.settings.guest_audio_forwarding = ui.get_settings_guest_audio();
+                let wanted_muted = ui.get_settings_sound_muted();
+                if !wanted_muted && !st.settings.audio_available {
+                    ui.set_settings_sound_muted(true);
+                    ui.set_settings_sound_volume(0);
+                    note = Some("Local audio unavailable in current kernel profile.");
+                } else {
+                    st.settings.sound_volume_pct =
+                        ui.get_settings_sound_volume().clamp(0, 100) as u8;
+                    st.settings.sound_muted = wanted_muted;
+                }
+                st.settings.guest_audio_forwarding =
+                    st.settings.audio_available && ui.get_settings_guest_audio();
+                if !st.settings.audio_available && ui.get_settings_guest_audio() {
+                    ui.set_settings_guest_audio(false);
+                }
                 st.settings.display_scale_pct =
                     ui.get_settings_display_scale().clamp(100, 200) as u16;
                 st.settings.smooth_transitions = ui.get_settings_smooth_transitions();
-                set_status(
-                    &ui,
+                let msg = if let Some(warning) = note {
+                    warning.to_string()
+                } else {
                     format!(
                         "Updated settings (Scale {}%, Volume {}%).",
                         st.settings.display_scale_pct,
@@ -780,9 +807,9 @@ fn wire_ui(
                         } else {
                             st.settings.sound_volume_pct
                         }
-                    ),
-                    false,
-                );
+                    )
+                };
+                set_status(&ui, msg, note.is_some());
             }
         });
     }

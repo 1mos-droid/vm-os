@@ -292,9 +292,11 @@ impl CheckpointCard {
 /// Guided Settings state for non-technical users.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuidedSettings {
+    pub wifi_available: bool,
     pub wifi_enabled: bool,
     pub wifi_network_name: String,
     pub airplane_isolation: bool,
+    pub audio_available: bool,
     pub sound_volume_pct: u8,
     pub sound_muted: bool,
     pub guest_audio_forwarding: bool,
@@ -302,19 +304,60 @@ pub struct GuidedSettings {
     pub smooth_transitions: bool,
 }
 
-impl Default for GuidedSettings {
-    fn default() -> Self {
+impl GuidedSettings {
+    /// Build initial settings honoring live Linux hardware capabilities (or full preview in `--mock`).
+    pub fn for_runtime(mock_mode: bool) -> Self {
+        let wifi_available = mock_mode || host_has_wifi();
+        let audio_available = mock_mode || host_has_audio();
         Self {
-            wifi_enabled: true,
-            wifi_network_name: "Home-5G".into(),
+            wifi_available,
+            wifi_enabled: wifi_available,
+            wifi_network_name: if wifi_available {
+                "Home-5G".into()
+            } else {
+                "Unavailable (kernel profile)".into()
+            },
             airplane_isolation: false,
-            sound_volume_pct: 75,
-            sound_muted: false,
-            guest_audio_forwarding: true,
+            audio_available,
+            sound_volume_pct: if audio_available { 75 } else { 0 },
+            sound_muted: !audio_available,
+            guest_audio_forwarding: audio_available,
             display_scale_pct: 100,
             smooth_transitions: true,
         }
     }
+}
+
+impl Default for GuidedSettings {
+    fn default() -> Self {
+        Self::for_runtime(true)
+    }
+}
+
+fn host_has_wifi() -> bool {
+    if let Ok(entries) = std::fs::read_dir("/sys/class/ieee80211") {
+        if entries.flatten().next().is_some() {
+            return true;
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            if entry.path().join("wireless").is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn host_has_audio() -> bool {
+    let Ok(cards) = std::fs::read_to_string("/proc/asound/cards") else {
+        return false;
+    };
+    cards.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('[')
+    })
 }
 
 /// Human-friendly Btrfs CoW storage savings readout for Guided Settings.

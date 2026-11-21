@@ -106,10 +106,12 @@ kernel = config(ext / 'kernel/hyperos.config', 'CONFIG_')
 busybox = config(ext / 'configs/busybox.fragment', 'CONFIG_')
 
 for symbol in ('BR2_x86_64', 'BR2_TOOLCHAIN_BUILDROOT_MUSL', 'BR2_INIT_NONE',
-               'BR2_SYSTEM_BIN_SH_DASH', 'BR2_PACKAGE_BUSYBOX', 'BR2_PACKAGE_RUNIT',
-               'BR2_PACKAGE_BTRFS_PROGS', 'BR2_PACKAGE_UTIL_LINUX',
-               'BR2_PACKAGE_UTIL_LINUX_BINARIES', 'BR2_PACKAGE_UTIL_LINUX_PARTX',
-               'BR2_TARGET_GRUB2', 'BR2_TARGET_GRUB2_I386_PC', 'BR2_TARGET_GRUB2_X86_64_EFI',
+               'BR2_SYSTEM_BIN_SH_DASH', 'BR2_LINUX_KERNEL_INSTALL_TARGET',
+               'BR2_PACKAGE_BUSYBOX', 'BR2_PACKAGE_RUNIT', 'BR2_PACKAGE_VMM_DAEMON',
+               'BR2_PACKAGE_BTRFS_PROGS', 'BR2_PACKAGE_IPROUTE2', 'BR2_PACKAGE_NFTABLES',
+               'BR2_PACKAGE_UTIL_LINUX', 'BR2_PACKAGE_UTIL_LINUX_BINARIES',
+               'BR2_PACKAGE_UTIL_LINUX_PARTX', 'BR2_TARGET_GRUB2',
+               'BR2_TARGET_GRUB2_I386_PC', 'BR2_TARGET_GRUB2_X86_64_EFI',
                'BR2_TARGET_ROOTFS_EROFS', 'BR2_PACKAGE_HOST_DOSFSTOOLS',
                'BR2_PACKAGE_HOST_MTOOLS', 'BR2_PACKAGE_HOST_GENIMAGE',
                'BR2_PACKAGE_HOST_BTRFS_PROGS', 'BR2_PACKAGE_HOST_ZSTD',
@@ -150,7 +152,17 @@ for path in ext.rglob('*'):
     if path.is_file() and (path.suffix == '.sh' or path.name in ('init', 'run', '1', '2', '3')):
         require(os.access(path, os.X_OK), f'{path} must be executable')
         subprocess.run(['sh', '-n', str(path)], check=True)
-subprocess.run(['sh', '-n', str(root / 'scripts/validate-configs.sh')], check=True)
+for script in ('scripts/validate-configs.sh', 'scripts/test-v1-release.sh'):
+    sp = root / script
+    require(sp.is_file() and os.access(sp, os.X_OK), f'{sp} must exist and be executable')
+    subprocess.run(['sh', '-n', str(sp)], check=True)
+
+# Guard against regression in GNU readelf PT_INTERP parsing and post-staging audit.
+build_initramfs = (ext / 'initramfs/build-initramfs.sh').read_text()
+require('[Requesting program interpreter: ' in build_initramfs,
+        'build-initramfs.sh must match GNU readelf "[Requesting program interpreter: ...]" format')
+require('requires missing ELF interpreter' in build_initramfs,
+        'build-initramfs.sh must fail closed when a staged binary is missing its ELF interpreter')
 
 # Validate hybrid disk image, GRUB boot menu, and initramfs contracts.
 genimage_cfg = (ext / 'board/genimage.cfg').read_text()

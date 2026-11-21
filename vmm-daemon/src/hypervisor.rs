@@ -43,6 +43,14 @@ impl CrosvmRunSpec {
     /// Generate exact `crosvm run` CLI arguments (no `--disable-sandbox`, preserving
     /// `crosvm`'s jail/seccomp isolation as required by `ARCHITECTURE.md`).
     pub fn to_crosvm_args(&self) -> Vec<String> {
+        let jail_cfg = if Path::new("/usr/share/policy/crosvm").is_dir() {
+            format!(
+                "pivot-root={},seccomp-policy-dir=/usr/share/policy/crosvm",
+                self.jail_pivot_root.display()
+            )
+        } else {
+            format!("pivot-root={}", self.jail_pivot_root.display())
+        };
         let mut args = vec![
             "run".to_string(),
             "--cpus".to_string(),
@@ -57,7 +65,7 @@ impl CrosvmRunSpec {
             "--socket".to_string(),
             self.control_socket.display().to_string(),
             "--jail-config".to_string(),
-            format!("pivot-root={}", self.jail_pivot_root.display()),
+            jail_cfg,
         ];
 
         if self.enable_gpu {
