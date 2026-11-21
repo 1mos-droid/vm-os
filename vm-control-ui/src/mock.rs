@@ -62,14 +62,10 @@ impl MockVmmBackend {
 
     /// Create an empty mock backend with explicit host RAM (MiB) and CPU count.
     pub fn empty(host_mem_total_mib: u64, host_online_cpus: u32) -> Self {
-        let known_images = [
-            "alpine-3-21-virtio",
-            "debian-12-slim-virtio",
-            "linux-demo",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let known_images = ["alpine-3-21-virtio", "debian-12-slim-virtio", "linux-demo"]
+            .into_iter()
+            .map(String::from)
+            .collect();
 
         Self {
             host_mem_total_mib,
@@ -152,7 +148,10 @@ impl MockVmmBackend {
                     id,
                     result: serde_json::to_value(ListVmsResult { vms }).unwrap(),
                 },
-                Err(ClientError::Rpc(error)) => RpcResponse::Error { id: Some(id), error },
+                Err(ClientError::Rpc(error)) => RpcResponse::Error {
+                    id: Some(id),
+                    error,
+                },
                 Err(ClientError::Transport(message)) => RpcResponse::Error {
                     id: Some(id),
                     error: RpcError {
@@ -460,6 +459,10 @@ impl VmmBackend for MockVmmBackend {
         }
         vm.network_mode = network_mode;
         Ok(vm.clone())
+    }
+
+    fn register_template_image(&mut self, image_id: &str) {
+        self.known_images.insert(image_id.to_string());
     }
 }
 

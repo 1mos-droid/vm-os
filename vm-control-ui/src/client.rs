@@ -57,6 +57,9 @@ pub trait VmmBackend {
         vm_id: &str,
         network_mode: NetworkMode,
     ) -> Result<Vm, ClientError>;
+
+    /// Notify an in-memory mock backend that a Template Store image has been provisioned.
+    fn register_template_image(&mut self, _image_id: &str) {}
 }
 
 /// Persistent AF_UNIX / SOCK_STREAM JSON-RPC 2.0 client for `/run/hyperos/vmm.sock`.
@@ -152,8 +155,8 @@ impl UnixSocketClient {
         R: for<'de> Deserialize<'de>,
     {
         let req_id = self.next_request_id(id_prefix);
-        let request = RpcRequest::new(req_id.clone(), method_name, params)
-            .map_err(ClientError::Transport)?;
+        let request =
+            RpcRequest::new(req_id.clone(), method_name, params).map_err(ClientError::Transport)?;
         let frame = encode_frame(&request).map_err(ClientError::Transport)?;
 
         match self.send_and_receive::<R>(&req_id, &frame) {
@@ -180,8 +183,8 @@ impl UnixSocketClient {
                 .map_err(|e| ClientError::Transport(format!("socket write failed: {e}")))?;
 
             if let Some(buffered) = conn.pending_responses.remove(expected_id) {
-                let decoded = decode_response_frame::<R>(&buffered)
-                    .map_err(ClientError::Transport)?;
+                let decoded =
+                    decode_response_frame::<R>(&buffered).map_err(ClientError::Transport)?;
                 return decoded.into_result().map_err(ClientError::Rpc);
             }
 
@@ -362,10 +365,8 @@ mod tests {
 
     #[test]
     fn unix_socket_client_speaks_all_eight_methods_over_af_unix() {
-        let sock_path = std::env::temp_dir().join(format!(
-            "hyperos-vmm-test-{}.sock",
-            uuid::Uuid::new_v4()
-        ));
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-vmm-test-{}.sock", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
@@ -431,10 +432,8 @@ mod tests {
 
     #[test]
     fn unix_socket_client_matches_out_of_order_response_ids() {
-        let sock_path = std::env::temp_dir().join(format!(
-            "hyperos-vmm-ooo-{}.sock",
-            uuid::Uuid::new_v4()
-        ));
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-vmm-ooo-{}.sock", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).unwrap();
 
@@ -449,7 +448,8 @@ mod tests {
 
             // Send an unrelated response first, then the matching one.
             let ooo = "{\"jsonrpc\":\"2.0\",\"id\":\"other-99\",\"result\":{\"vms\":[]}}\n";
-            let matching = format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":{{\"vms\":[]}}}}\n");
+            let matching =
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":{{\"vms\":[]}}}}\n");
             writer.write_all(ooo.as_bytes()).unwrap();
             writer.write_all(matching.as_bytes()).unwrap();
             writer.flush().unwrap();

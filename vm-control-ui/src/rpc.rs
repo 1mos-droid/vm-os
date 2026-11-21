@@ -410,30 +410,30 @@ impl<'de> Deserialize<'de> for RpcMethodEnvelope {
         }
 
         let call = match raw.method.as_str() {
-            method::CREATE_VM => {
-                RpcMethodCall::CreateVm(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
-            method::START_VM => {
-                RpcMethodCall::StartVm(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
-            method::STOP_VM => {
-                RpcMethodCall::StopVm(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
-            method::PAUSE_VM => {
-                RpcMethodCall::PauseVm(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
-            method::SNAPSHOT_VM => {
-                RpcMethodCall::SnapshotVm(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
+            method::CREATE_VM => RpcMethodCall::CreateVm(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::START_VM => RpcMethodCall::StartVm(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::STOP_VM => RpcMethodCall::StopVm(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::PAUSE_VM => RpcMethodCall::PauseVm(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::SNAPSHOT_VM => RpcMethodCall::SnapshotVm(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
             method::SET_BALLOON_RAM => RpcMethodCall::SetBalloonRam(
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
             method::SET_NETWORK_MODE => RpcMethodCall::SetNetworkMode(
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
-            method::LIST_VMS => {
-                RpcMethodCall::ListVms(serde_json::from_value(raw.params).map_err(de::Error::custom)?)
-            }
+            method::LIST_VMS => RpcMethodCall::ListVms(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
             other => {
                 return Err(de::Error::custom(format!("unknown RPC method: {other}")));
             }
@@ -584,12 +584,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for RpcResponse<T> {
                 }
 
                 match (result_seen, error_seen) {
-                    (true, true) => {
-                        Err(de::Error::custom("response must not contain both result and error"))
-                    }
-                    (false, false) => {
-                        Err(de::Error::custom("response must contain either result or error"))
-                    }
+                    (true, true) => Err(de::Error::custom(
+                        "response must not contain both result and error",
+                    )),
+                    (false, false) => Err(de::Error::custom(
+                        "response must contain either result or error",
+                    )),
                     (true, false) => {
                         let id_str = id.ok_or_else(|| {
                             de::Error::custom("success response must have a non-null string id")
@@ -644,8 +644,8 @@ pub fn decode_response_frame<T: for<'de> Deserialize<'de>>(
     let line = frame
         .strip_suffix(b"\n")
         .ok_or_else(|| "response frame missing trailing LF".to_string())?;
-    let trimmed = std::str::from_utf8(line)
-        .map_err(|e| format!("response frame is not valid UTF-8: {e}"))?;
+    let trimmed =
+        std::str::from_utf8(line).map_err(|e| format!("response frame is not valid UTF-8: {e}"))?;
     if !trimmed.trim_start().starts_with('{') {
         return Err("response frame must be a single JSON object (no batches)".to_string());
     }
@@ -812,7 +812,10 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":"snap-1","method":"snapshot_vm","params":{{"vm_id":"{SAMPLE_VM_ID}"}}}}"#
             )
         );
-        assert_eq!(serde_json::from_str::<RpcMethodEnvelope>(&req_wire).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&req_wire).unwrap(),
+            req
+        );
 
         let snap_resp_wire = r#"{"jsonrpc":"2.0","id":"snap-1","result":{"snapshot_id":"4f281e57-3717-40fe-9d90-025f37962bbd","vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","created_at":"2026-11-20T00:00:00Z"}}"#;
         let resp: RpcResponse<Snapshot> = serde_json::from_str(snap_resp_wire).unwrap();
@@ -846,7 +849,10 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":"balloon-1","method":"set_balloon_ram","params":{{"vm_id":"{SAMPLE_VM_ID}","ram_mib":512}}}}"#
             )
         );
-        assert_eq!(serde_json::from_str::<RpcMethodEnvelope>(&wire).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&wire).unwrap(),
+            req
+        );
 
         assert_eq!(balloon_bytes(1024, 512).unwrap(), 512 * 1_048_576);
         assert_eq!(balloon_bytes(1024, 1024).unwrap(), 0);
@@ -875,7 +881,10 @@ mod tests {
                     r#"{{"jsonrpc":"2.0","id":"net-{expected_str}","method":"set_network_mode","params":{{"vm_id":"{SAMPLE_VM_ID}","network_mode":"{expected_str}"}}}}"#
                 )
             );
-            assert_eq!(serde_json::from_str::<RpcMethodEnvelope>(&wire).unwrap(), req);
+            assert_eq!(
+                serde_json::from_str::<RpcMethodEnvelope>(&wire).unwrap(),
+                req
+            );
         }
     }
 
@@ -895,7 +904,8 @@ mod tests {
         );
         assert_eq!(serde_json::to_string(&parsed).unwrap(), err_with_id);
 
-        let err_null_id = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}"#;
+        let err_null_id =
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}"#;
         let parsed_null: RpcResponse<Vm> = serde_json::from_str(err_null_id).unwrap();
         assert_eq!(
             parsed_null,
@@ -917,7 +927,8 @@ mod tests {
         assert!(serde_json::from_str::<RpcMethodEnvelope>(unknown_param).is_err());
 
         // Unknown key on list_vms params
-        let unknown_list = r#"{"jsonrpc":"2.0","id":"l1","method":"list_vms","params":{"all":true}}"#;
+        let unknown_list =
+            r#"{"jsonrpc":"2.0","id":"l1","method":"list_vms","params":{"all":true}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(unknown_list).is_err());
 
         // Unknown key on VM response
@@ -934,7 +945,8 @@ mod tests {
         let bool_ram = r#"{"jsonrpc":"2.0","id":"b1","method":"set_balloon_ram","params":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","ram_mib":true}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(bool_ram).is_err());
 
-        let float_error_code = r#"{"jsonrpc":"2.0","id":"e1","error":{"code":-32602.0,"message":"bad"}}"#;
+        let float_error_code =
+            r#"{"jsonrpc":"2.0","id":"e1","error":{"code":-32602.0,"message":"bad"}}"#;
         assert!(serde_json::from_str::<RpcResponse<Vm>>(float_error_code).is_err());
     }
 

@@ -1,0 +1,768 @@
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+export struct SpacePill {
+    vm-id: string,
+    name: string,
+    ram-label: string,
+    accent: color,
+    active: bool,
+    running: bool,
+}
+
+export struct ShellWindowCard {
+    window-id: int,
+    title: string,
+    badge-label: string,
+    accent: color,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    focused: bool,
+    snap-label: string,
+}
+
+export struct DeckResultItem {
+    entry-id: string,
+    title: string,
+    subtitle: string,
+    category: string,
+    accent: color,
+}
+
+export component HyperShellWindow inherits Window {
+    title: "HyperOS — Workspace-First Desktop Shell";
+    preferred-width: 1280px;
+    preferred-height: 760px;
+    min-width: 960px;
+    min-height: 600px;
+    background: #090d16;
+
+    // Top Context Rail properties
+    in property <[SpacePill]> space-pills: [];
+    in property <string> active-space-key: "host";
+    in property <string> host-zram-label: "RAM 310 / 4096M · ZRAM 142M";
+    in property <float> host-ram-ratio: 0.15;
+    in property <string> wifi-label: "Wi-Fi";
+    in property <bool> wifi-enabled: true;
+    in property <string> audio-label: "Vol 72%";
+    in property <bool> audio-muted: false;
+    in property <string> battery-label: "84%";
+    in property <int> display-scale-pct: 100;
+    in property <bool> global-offline-shield: false;
+    in property <string> rail-toast: "";
+
+    // Compositor window surfaces (2px colored origin border + subtle origin badge)
+    in property <[ShellWindowCard]> windows: [];
+
+    // Super-key Action Deck overlay
+    in-out property <bool> action-deck-visible: false;
+    in-out property <string> deck-query: "";
+    in property <[DeckResultItem]> deck-results: [];
+
+    // Callbacks wired in Rust (Smithay + VMM JSON-RPC bridge)
+    callback toggle-action-deck();
+    callback deck-query-changed(string);
+    callback activate-space(string);
+    callback new-space-clicked();
+    callback reclaim-ram-clicked();
+    callback launch-preset(string);
+    callback activate-deck-entry(string);
+    callback focus-window(int);
+    callback snap-window-action(int, string);
+    callback toggle-wifi();
+    callback toggle-audio-mute();
+    callback cycle-display-scale();
+    callback toggle-offline-shield();
+
+    // Global keyboard shortcut handler (Super / Escape)
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Meta || (event.text == "\u{001b}" && root.action-deck-visible)) {
+                root.toggle-action-deck();
+                return accept;
+            }
+            reject
+        }
+
+        // ================= WORKSPACE CANVAS =================
+        Rectangle {
+            x: 0px;
+            y: 46px;
+            width: parent.width;
+            height: parent.height - 46px;
+            background: @linear-gradient(155deg, #090d16 0%, #0f172a 55%, #0c1322 100%);
+
+            // Subtle ambient workspace hint when no windows are open
+            if root.windows.length == 0 : VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+                Text {
+                    text: "HyperOS Workspace-First Shell";
+                    color: #94a3b8;
+                    font-size: 20px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Press Super for the Action Deck or click + New Space in the Top Context Rail.";
+                    color: #64748b;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Managed windows with 2px colored origin border + subtle top-left origin badge
+            for win in root.windows : Rectangle {
+                x: win.x - 2px;
+                y: win.y - 46px - 2px;
+                width: win.width + 4px;
+                height: win.height + 4px;
+                border-radius: 10px;
+                background: #0f172a;
+                border-width: 2px;
+                border-color: win.accent;
+
+                TouchArea {
+                    clicked => { root.focus-window(win.window-id); }
+                }
+
+                // Subtle colored origin badge + lightweight magnetic snap controls
+                Rectangle {
+                    x: 2px;
+                    y: 2px;
+                    width: parent.width - 4px;
+                    height: 34px;
+                    background: #111827;
+                    border-top-left-radius: 8px;
+                    border-top-right-radius: 8px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            // Subtle colored origin badge pill
+                            Rectangle {
+                                height: 22px;
+                                y: 6px;
+                                border-radius: 11px;
+                                background: win.accent;
+                                HorizontalLayout {
+                                    padding-left: 9px;
+                                    padding-right: 9px;
+                                    Text {
+                                        text: win.badge-label;
+                                        color: #090d16;
+                                        font-size: 10px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: win.title;
+                                color: #f8fafc;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Magnetic half/quarter snap triggers
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: end;
+                            Button {
+                                text: "◧";
+                                clicked => { root.snap-window-action(win.window-id, "left-half"); }
+                            }
+                            Button {
+                                text: "◨";
+                                clicked => { root.snap-window-action(win.window-id, "right-half"); }
+                            }
+                            Button {
+                                text: "◰";
+                                clicked => { root.snap-window-action(win.window-id, "top-left"); }
+                            }
+                            Button {
+                                text: "◲";
+                                clicked => { root.snap-window-action(win.window-id, "bottom-right"); }
+                            }
+                            Button {
+                                text: "⬜";
+                                clicked => { root.snap-window-action(win.window-id, "full"); }
+                            }
+                        }
+                    }
+                }
+
+                // Client Wayland surface viewport placeholder (rendered by Smithay in KMS/Winit output)
+                Rectangle {
+                    x: 2px;
+                    y: 36px;
+                    width: parent.width - 4px;
+                    height: parent.height - 38px;
+                    background: #0b1120;
+                    border-bottom-left-radius: 8px;
+                    border-bottom-right-radius: 8px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text {
+                            text: win.title;
+                            color: #e2e8f0;
+                            font-size: 16px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Origin: " + win.badge-label + (win.snap-label != "" ? "  •  Snapped: " + win.snap-label : "");
+                            color: #64748b;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= TOP CONTEXT RAIL (NO DOCK / NO MENU BAR) =================
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 46px;
+            background: #0b1220;
+            border-width: 1px;
+            border-color: #1e293b;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+                alignment: space-between;
+
+                // Left: Action Deck trigger + VM Space Pills + "+ New Space"
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    // Super Action Deck pill
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: root.action-deck-visible ? #06b6d4 : #1e293b;
+                        border-width: 1px;
+                        border-color: root.action-deck-visible ? #22d3ee : #334155;
+
+                        TouchArea {
+                            clicked => { root.toggle-action-deck(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Text {
+                                text: "◈ Deck";
+                                color: root.action-deck-visible ? #090d16 : #f8fafc;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Active VM Pill Tabs with live RAM readout
+                    for pill in root.space-pills : Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: pill.active ? #1e293b : #111827;
+                        border-width: pill.active ? 2px : 1px;
+                        border-color: pill.active ? pill.accent : #243247;
+
+                        TouchArea {
+                            clicked => { root.activate-space(pill.vm-id); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                y: 11px;
+                                border-radius: 4px;
+                                background: pill.accent;
+                            }
+                            Text {
+                                text: pill.name;
+                                color: #f8fafc;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: pill.ram-label;
+                                color: #94a3b8;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // + New Space quick-launch button
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: #0f2942;
+                        border-width: 1px;
+                        border-color: #0284c7;
+
+                        TouchArea {
+                            clicked => { root.new-space-clicked(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 11px;
+                            padding-right: 11px;
+                            Text {
+                                text: "+ New Space";
+                                color: #7dd3fc;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Right: Reclaim RAM + Host+ZRAM meter + Wi-Fi + Audio + Battery
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: end;
+
+                    // Reclaim RAM pill (deflates idle VM balloons)
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: #064e3b;
+                        border-width: 1px;
+                        border-color: #10b981;
+
+                        TouchArea {
+                            clicked => { root.reclaim-ram-clicked(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text {
+                                text: "⚡ Reclaim RAM";
+                                color: #a7f3d0;
+                                font-size: 11px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Host + ZRAM compact meter pill
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: #111827;
+                        border-width: 1px;
+                        border-color: #243247;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            Text {
+                                text: root.host-zram-label;
+                                color: #cbd5e1;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Wi-Fi pill
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: root.wifi-enabled && !root.global-offline-shield ? #111827 : #451a03;
+                        border-width: 1px;
+                        border-color: root.wifi-enabled && !root.global-offline-shield ? #243247 : #f59e0b;
+
+                        TouchArea {
+                            clicked => { root.toggle-wifi(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            Text {
+                                text: root.wifi-label;
+                                color: root.wifi-enabled && !root.global-offline-shield ? #cbd5e1 : #fcd34d;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Audio pill
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: #111827;
+                        border-width: 1px;
+                        border-color: #243247;
+
+                        TouchArea {
+                            clicked => { root.toggle-audio-mute(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            Text {
+                                text: root.audio-label;
+                                color: root.audio-muted ? #f87171 : #cbd5e1;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Battery pill
+                    Rectangle {
+                        height: 30px;
+                        y: 8px;
+                        border-radius: 15px;
+                        background: #111827;
+                        border-width: 1px;
+                        border-color: #243247;
+
+                        HorizontalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            Text {
+                                text: root.battery-label;
+                                color: #cbd5e1;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Transient notification pill below the Top Context Rail
+        if root.rail-toast != "" : Rectangle {
+            y: 54px;
+            x: (parent.width - 440px) / 2;
+            width: 440px;
+            height: 32px;
+            border-radius: 16px;
+            background: #0f2942ee;
+            border-width: 1px;
+            border-color: #38bdf8;
+
+            Text {
+                text: root.rail-toast;
+                color: #e0f2fe;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // ================= SUPER-KEY ACTION DECK OVERLAY =================
+        if root.action-deck-visible : Rectangle {
+            x: 0px;
+            y: 46px;
+            width: parent.width;
+            height: parent.height - 46px;
+            background: #020617cc;
+
+            TouchArea {
+                clicked => { root.toggle-action-deck(); }
+            }
+
+            Rectangle {
+                width: 720px;
+                height: 520px;
+                x: (parent.width - self.width) / 2;
+                y: 36px;
+                border-radius: 16px;
+                background: #0f172a;
+                border-width: 1px;
+                border-color: #334155;
+
+                // Stop clicks inside the Action Deck from dismissing it
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+
+                    // Header + Instant Search Bar
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "Action Deck";
+                            color: #f8fafc;
+                            font-size: 18px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Super to toggle  •  Esc to close";
+                            color: #64748b;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    LineEdit {
+                        placeholder-text: "Search apps, active Spaces, or instant environments…";
+                        text <=> root.deck-query;
+                        edited(q) => { root.deck-query-changed(q); }
+                    }
+
+                    // One-Click Instant Environment Launchers
+                    Text {
+                        text: "INSTANT ENVIRONMENTS";
+                        color: #94a3b8;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        // Disposable Browser
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 86px;
+                            border-radius: 10px;
+                            background: #111827;
+                            border-width: 1px;
+                            border-color: #06b6d4;
+
+                            TouchArea {
+                                clicked => { root.launch-preset("disposable-browser"); }
+                            }
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+                                Text {
+                                    text: "Disposable Browser";
+                                    color: #67e8f9;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: "Safe Web · Self-destructs on close";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Work Pod
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 86px;
+                            border-radius: 10px;
+                            background: #111827;
+                            border-width: 1px;
+                            border-color: #10b981;
+
+                            TouchArea {
+                                clicked => { root.launch-preset("work-pod"); }
+                            }
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+                                Text {
+                                    text: "Work Pod";
+                                    color: #6ee7b7;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: "Safe Web · Daily apps & checkpoints";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Offline Vault
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 86px;
+                            border-radius: 10px;
+                            background: #111827;
+                            border-width: 1px;
+                            border-color: #f59e0b;
+
+                            TouchArea {
+                                clicked => { root.launch-preset("offline-vault"); }
+                            }
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+                                Text {
+                                    text: "Offline Vault";
+                                    color: #fcd34d;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: "Zero Network · Air-gapped private files";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Searchable Apps & Spaces List
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: start;
+
+                            for item in root.deck-results : Rectangle {
+                                height: 48px;
+                                border-radius: 8px;
+                                background: #162033;
+                                border-width: 1px;
+                                border-color: #243247;
+
+                                TouchArea {
+                                    clicked => { root.activate-deck-entry(item.entry-id); }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 10px;
+                                    alignment: space-between;
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Rectangle {
+                                            width: 4px;
+                                            height: 26px;
+                                            y: 11px;
+                                            border-radius: 2px;
+                                            background: item.accent;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: item.title;
+                                                color: #f8fafc;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: item.subtitle;
+                                                color: #94a3b8;
+                                                font-size: 11px;
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: item.category;
+                                        color: #64748b;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Quick Hardware Toggles Row
+                    Rectangle {
+                        height: 48px;
+                        border-radius: 10px;
+                        background: #111827;
+                        border-width: 1px;
+                        border-color: #243247;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            alignment: space-between;
+
+                            Text {
+                                text: "Quick Hardware";
+                                color: #94a3b8;
+                                font-size: 11px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Button {
+                                    text: root.wifi-enabled ? "Wi-Fi: On" : "Wi-Fi: Off";
+                                    primary: root.wifi-enabled;
+                                    clicked => { root.toggle-wifi(); }
+                                }
+                                Button {
+                                    text: root.audio-muted ? "Audio: Muted" : "Audio: On";
+                                    primary: !root.audio-muted;
+                                    clicked => { root.toggle-audio-mute(); }
+                                }
+                                Button {
+                                    text: "Scale: " + root.display-scale-pct + "%";
+                                    clicked => { root.cycle-display-scale(); }
+                                }
+                                Button {
+                                    text: root.global-offline-shield ? "Offline Shield: ON" : "Offline Shield";
+                                    primary: root.global-offline-shield;
+                                    clicked => { root.toggle-offline-shield(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
