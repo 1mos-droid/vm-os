@@ -29,7 +29,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Linux kernel `BTRFS_SUPER_MAGIC` constant (`0x9123683E`).
-const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
 
 /// Monotonic counter guaranteeing unique temp filenames for concurrent atomic writes.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -589,10 +589,13 @@ pub fn verify_btrfs_mount(path: &Path) -> Result<(), String> {
             io::Error::last_os_error()
         ));
     }
-    if stat.f_type != BTRFS_SUPER_MAGIC {
+    // `statfs.f_type` is `i64` on glibc and `u64` on musl.
+    #[allow(clippy::unnecessary_cast)]
+    let fs_type = stat.f_type as u64;
+    if fs_type != BTRFS_SUPER_MAGIC {
         return Err(format!(
             "storage root is not a Btrfs filesystem (fs magic 0x{:x}, expected 0x{:x})",
-            stat.f_type, BTRFS_SUPER_MAGIC
+            fs_type, BTRFS_SUPER_MAGIC
         ));
     }
     Ok(())
