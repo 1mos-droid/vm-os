@@ -7,13 +7,16 @@ CROSVM_SOURCE = $(CROSVM_VERSION).tar.gz
 CROSVM_LICENSE = BSD-3-Clause
 CROSVM_LICENSE_FILES = LICENSE third_party/minijail/LICENSE
 CROSVM_MINIJAIL_VERSION = 7845d89927a82dbdcdee6276837cd0978f69ba19
-CROSVM_EXTRA_DOWNLOADS = https://chromium.googlesource.com/chromiumos/platform/minijail/+archive/$(CROSVM_MINIJAIL_VERSION).tar.gz
+# GitHub's official mirror: its archives are stable, unlike gitiles "+archive"
+# tarballs (generated on demand, and the "+" breaks Buildroot's method+URL parsing).
+CROSVM_EXTRA_DOWNLOADS = https://github.com/google/minijail/archive/$(CROSVM_MINIJAIL_VERSION).tar.gz
 CROSVM_DEPENDENCIES = libcap wayland host-wayland host-pkgconf
 CROSVM_CARGO_HOME = $(if $(CARGO_HOME),$(CARGO_HOME),$(DL_DIR)/cargo-home)
 CROSVM_TARGET_DIR = $(@D)/br-target
 
 define CROSVM_EXTRACT_MINIJAIL
-	$(TAR) -xf $(CROSVM_DL_DIR)/$(CROSVM_MINIJAIL_VERSION).tar.gz -C $(@D)/third_party/minijail
+	mkdir -p $(@D)/third_party/minijail
+	$(TAR) -xf $(CROSVM_DL_DIR)/$(CROSVM_MINIJAIL_VERSION).tar.gz --strip-components=1 -C $(@D)/third_party/minijail
 endef
 CROSVM_POST_EXTRACT_HOOKS += CROSVM_EXTRACT_MINIJAIL
 
