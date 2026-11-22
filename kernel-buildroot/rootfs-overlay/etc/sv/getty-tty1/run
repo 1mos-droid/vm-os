@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /sbin/getty -n -l /bin/sh 38400 tty1 linux

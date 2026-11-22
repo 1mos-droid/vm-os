@@ -13,7 +13,7 @@ chmod 0700 /run/hyperos
 mount -t devpts -o mode=0620,nosuid,noexec devpts /dev/pts
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
-for service in zram ksm storage vmm-daemon; do
+for service in zram ksm storage vmm-daemon getty-tty1; do
     mkdir -p "/run/runit/$service"
     ln -s "/etc/sv/$service" "/run/service/$service"
 done

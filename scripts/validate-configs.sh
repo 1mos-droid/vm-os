@@ -128,14 +128,16 @@ for symbol in ('KVM', 'KVM_INTEL', 'KVM_AMD', 'ZRAM', 'ZRAM_BACKEND_ZSTD', 'KSM'
                'I2C_HID_CORE', 'I2C_HID_ACPI',
                'EROFS_FS', 'EROFS_FS_ZIP', 'OVERLAY_FS',
                'DRM_I915', 'DRM_AMDGPU', 'DRM_SIMPLEDRM', 'DRM_VIRTIO_GPU',
-               'SYSFB_SIMPLEFB'):
+               'SYSFB_SIMPLEFB',
+               'INPUT', 'INPUT_KEYBOARD', 'SERIO', 'SERIO_I8042', 'KEYBOARD_ATKBD',
+               'VT', 'VT_CONSOLE', 'FRAMEBUFFER_CONSOLE'):
     require(kernel.get('CONFIG_' + symbol) == 'y', f'{symbol} must be built in')
 
 for symbol in ('BLK_DEV_FD', 'PARPORT', 'SOUND', 'MODULES', 'NFS_FS', 'CIFS', 'XFS_FS'):
     require(kernel.get('CONFIG_' + symbol) == 'n', f'{symbol} must be disabled')
 
 for symbol in ('CONFIG_FEATURE_MOUNT_LABEL', 'CONFIG_FEATURE_SWAPON_PRI',
-               'CONFIG_SWITCH_ROOT', 'CONFIG_MOUNTPOINT'):
+               'CONFIG_SWITCH_ROOT', 'CONFIG_MOUNTPOINT', 'CONFIG_GETTY'):
     require(busybox.get(symbol) == 'y', f'BusyBox {symbol} must be enabled')
 
 for value in br.values():
@@ -143,10 +145,15 @@ for value in br.values():
         require((ext / relative).exists(), f'missing config input {relative}')
 
 for required_script in ('initramfs/init', 'initramfs/build-initramfs.sh',
-                        'board/post-build.sh', 'board/post-image.sh'):
+                        'board/post-build.sh', 'board/post-image.sh',
+                        'rootfs-overlay/etc/sv/getty-tty1/run'):
     p = ext / required_script
     require(p.is_file(), f'missing required script {required_script}')
     require(os.access(p, os.X_OK), f'{p} must be executable')
+
+for runit_ref in ('rootfs-overlay/etc/runit/1', 'board/post-build.sh'):
+    require('getty-tty1' in (ext / runit_ref).read_text(),
+            f'{runit_ref} must include getty-tty1 service')
 
 for path in ext.rglob('*'):
     if path.is_file() and (path.suffix == '.sh' or path.name in ('init', 'run', '1', '2', '3')):
