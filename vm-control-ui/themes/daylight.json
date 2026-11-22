@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "daylight",
+  "name": "HyperOS Daylight",
+  "layout_preset": "comfortable",
+  "colors": {
+    "window_bg": "#e2e8f0",
+    "canvas_bg": "#f8fafc",
+    "surface_bg": "#ffffff",
+    "surface_elevated": "#f1f5f9",
+    "border": "#cbd5e1",
+    "text_primary": "#0f172a",
+    "text_secondary": "#334155",
+    "text_muted": "#475569",
+    "accent": "#0284c7",
+    "danger": "#dc2626",
+    "success": "#059669"
+  },
+  "fonts": {
+    "ui_family": "DejaVu Sans",
+    "mono_family": "DejaVu Sans Mono",
+    "base_size_px": 13,
+    "heading_size_px": 19
+  },
+  "radii": {
+    "sm_px": 8,
+    "md_px": 12,
+    "lg_px": 16,
+    "pill_px": 16
+  },
+  "spacing": {
+    "xs_px": 6,
+    "sm_px": 10,
+    "md_px": 14,
+    "lg_px": 18
+  }
+}

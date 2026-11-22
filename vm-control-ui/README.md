@@ -80,3 +80,10 @@ Per [`ARCHITECTURE.md`](../ARCHITECTURE.md) Contract v2 (A3):
 - `vm-control-ui` runs as an unprivileged GUI user belonging to `hyperos` (`id -nG` shows `hyperos`).
 - `/var/lib/hyperos` is `root:hyperos 0710` and `captures/` is `root:hyperos 0750`, while `base-images/` and `instances/` remain `root:root 0700`; `discover_templates()` falls back cleanly when `base-images/` returns `PermissionDenied`.
 - Connection errors in the status bar distinguish missing `hyperos` group permissions, immediate `SO_PEERCRED` close, `vmm-daemon` not running (`sv status /run/service/vmm-daemon`), and timeouts without blindly retrying mutating RPCs.
+
+### Data-Only JSON Themes (`themes/`)
+
+`vm-control-ui` loads a pure JSON token file at startup (`--theme <PATH>` CLI flag or `HYPEROS_THEME` env var, defaulting to the built-in Obsidian theme):
+- Shipped themes: [`themes/obsidian.json`](themes/obsidian.json) (`layout_preset: "compact"`) and [`themes/daylight.json`](themes/daylight.json) (`layout_preset: "comfortable"`).
+- Strict validation (`#[serde(deny_unknown_fields)]`, `schema_version == 1`, 64 KiB cap, exact `#RRGGBB` hex literals, bounded integers, safe font names): malformed, unknown-key, oversized, or out-of-range theme files trigger a fallback to built-in Obsidian with a warning status banner and zero code execution.
+- Security boundary: VM security origin border colors remain isolated from theme tokens.

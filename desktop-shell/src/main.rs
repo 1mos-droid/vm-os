@@ -7,6 +7,7 @@ use desktop_shell::compositor::{accept_pending_clients, HyperShellState};
 use desktop_shell::layout::{Rect, SnapZone, TOP_RAIL_HEIGHT_PX};
 use desktop_shell::origin::{Rgb, WindowOrigin};
 use desktop_shell::sys_status::SystemStatus;
+use desktop_shell::theme::{load_theme_or_fallback, parse_hex_rgb, resolve_theme_path, ThemeFile};
 use desktop_shell::vmm_bridge::{
     format_capture_bytes, launch_environment_preset, network_badge_label, reclaim_idle_ram,
     CaptureSummary, EnvironmentPreset, MockShellVmmBridge, ShellVmmBridge, SnapshotSummary,
@@ -30,6 +31,7 @@ struct ShellCli {
     kms: bool,
     vmm_socket: PathBuf,
     wayland_socket: Option<String>,
+    theme: Option<PathBuf>,
 }
 
 fn parse_cli() -> Result<Option<ShellCli>, String> {
@@ -38,6 +40,7 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
     let mut kms = false;
     let mut vmm_socket = PathBuf::from(DEFAULT_VMM_SOCKET);
     let mut wayland_socket = None;
+    let mut theme = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -57,6 +60,12 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
                     .ok_or_else(|| "--wayland-socket requires a socket name".to_string())?;
                 wayland_socket = Some(name);
             }
+            "--theme" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| "--theme requires a JSON theme file path".to_string())?;
+                theme = Some(PathBuf::from(p));
+            }
             "-h" | "--help" => {
                 println!(
                     "HyperOS Workspace-First Desktop Shell (Smithay + Slint)\n\
@@ -70,6 +79,7 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
                        --kms                     Force bare-metal DRM/KMS + libinput backend\n\
                        --socket <PATH>           vmm-daemon Unix socket (default: {DEFAULT_VMM_SOCKET})\n\
                        --wayland-socket <NAME>   Wayland listening socket name (default: auto wayland-hyperos-*)\n\
+                       --theme <PATH>            Load a JSON token theme file (or set HYPEROS_THEME)\n\
                        -h, --help                Print this help message"
                 );
                 return Ok(None);
@@ -84,6 +94,7 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
         kms,
         vmm_socket,
         wayland_socket,
+        theme,
     }))
 }
 
@@ -101,6 +112,43 @@ struct ShellRuntime {
 
 fn rgb_to_slint(c: Rgb) -> Color {
     Color::from_rgb_u8(c.r, c.g, c.b)
+}
+
+fn theme_color(hex: &str) -> Color {
+    let (r, g, b) = parse_hex_rgb(hex).expect("validated ThemeFile must hold #RRGGBB colors");
+    Color::from_rgb_u8(r, g, b)
+}
+
+fn apply_theme_to_ui(ui: &HyperShellWindow, theme: &ThemeFile) {
+    let g = ui.global::<Theme>();
+    g.set_id(SharedString::from(theme.id.as_str()));
+    g.set_name(SharedString::from(theme.name.as_str()));
+    g.set_layout_preset(SharedString::from(theme.layout_preset.as_str()));
+    g.set_density_level(theme.layout_preset.density_level());
+    g.set_window_bg(theme_color(&theme.colors.window_bg));
+    g.set_canvas_bg(theme_color(&theme.colors.canvas_bg));
+    g.set_surface_bg(theme_color(&theme.colors.surface_bg));
+    g.set_surface_elevated(theme_color(&theme.colors.surface_elevated));
+    g.set_border(theme_color(&theme.colors.border));
+    g.set_text_primary(theme_color(&theme.colors.text_primary));
+    g.set_text_secondary(theme_color(&theme.colors.text_secondary));
+    g.set_text_muted(theme_color(&theme.colors.text_muted));
+    g.set_accent(theme_color(&theme.colors.accent));
+    g.set_danger(theme_color(&theme.colors.danger));
+    g.set_success(theme_color(&theme.colors.success));
+    g.set_ui_font_family(SharedString::from(theme.fonts.ui_family.as_str()));
+    g.set_mono_font_family(SharedString::from(theme.fonts.mono_family.as_str()));
+    g.set_font_base(theme.fonts.base_size_px as f32);
+    g.set_font_heading(theme.fonts.heading_size_px as f32);
+    g.set_radius_sm(theme.radii.sm_px as f32);
+    g.set_radius_md(theme.radii.md_px as f32);
+    g.set_radius_lg(theme.radii.lg_px as f32);
+    g.set_radius_pill(theme.radii.pill_px as f32);
+    g.set_space_xs(theme.spacing.xs_px as f32);
+    g.set_space_sm(theme.spacing.sm_px as f32);
+    g.set_space_md(theme.spacing.md_px as f32);
+    g.set_space_lg(theme.spacing.lg_px as f32);
+    g.invoke_sync_palette(!theme.is_light_surface());
 }
 
 fn hex_to_slint(hex: &str) -> Color {
@@ -815,7 +863,10 @@ fn should_use_kms(cli: &ShellCli) -> Result<bool, String> {
 }
 
 #[cfg(feature = "kms-direct")]
-fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_kms_shell(
+    cli: ShellCli,
+    theme_outcome: &desktop_shell::theme::ThemeLoadOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
     let kms_session = desktop_shell::kms::KmsSession::open_and_install_platform()
         .map_err(|e| format!("KMS backend init failed: {e}"))?;
     let (out_w, out_h) = kms_session.size();
@@ -831,6 +882,7 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let ui = HyperShellWindow::new()?;
+    apply_theme_to_ui(&ui, &theme_outcome.theme);
     let rt = Rc::new(RefCell::new(ShellRuntime {
         compositor,
         bridge,
@@ -843,6 +895,9 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         sys: SystemStatus::read(cli.mock, None),
     }));
     wire_shell(&ui, Rc::clone(&rt));
+    if let Some(ref w) = theme_outcome.warning {
+        ui.set_rail_toast(SharedString::from(w.as_str()));
+    }
 
     let display_rc = Rc::new(RefCell::new(display));
 
@@ -896,7 +951,10 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "winit")]
-fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_winit_shell(
+    cli: ShellCli,
+    theme_outcome: &desktop_shell::theme::ThemeLoadOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (display, mut compositor) = HyperShellState::new(1280, 760)?;
     let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
 
@@ -908,6 +966,7 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let ui = HyperShellWindow::new()?;
+    apply_theme_to_ui(&ui, &theme_outcome.theme);
     let rt = Rc::new(RefCell::new(ShellRuntime {
         compositor,
         bridge,
@@ -921,6 +980,9 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     wire_shell(&ui, Rc::clone(&rt));
+    if let Some(ref w) = theme_outcome.warning {
+        ui.set_rail_toast(SharedString::from(w.as_str()));
+    }
 
     let anim_timer = Timer::default();
     {
@@ -966,6 +1028,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    let env_theme = std::env::var("HYPEROS_THEME").ok();
+    let theme_path = resolve_theme_path(cli.theme.as_deref(), env_theme.as_deref());
+    let theme_outcome = load_theme_or_fallback(theme_path.as_deref());
+    if let Some(ref warning) = theme_outcome.warning {
+        eprintln!("desktop-shell: {warning}");
+    }
+
     if cli.headless {
         let (mut display, mut compositor) = HyperShellState::new(1280, 760)?;
         let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
@@ -976,8 +1045,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => eprintln!("desktop-shell: {err}"),
         }
         println!(
-            "desktop-shell: running Smithay Wayland compositor headlessly (mock={})",
-            cli.mock
+            "desktop-shell: running Smithay Wayland compositor headlessly (mock={}, theme={})",
+            cli.mock, theme_outcome.theme.id
         );
         let mut dh = display.handle();
         if let Some(ref sock) = listener {
@@ -989,12 +1058,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if should_use_kms(&cli)? {
         #[cfg(feature = "kms-direct")]
-        return run_kms_shell(cli);
+        return run_kms_shell(cli, &theme_outcome);
         #[cfg(not(feature = "kms-direct"))]
         unreachable!("should_use_kms checked kms-direct feature");
     } else {
         #[cfg(feature = "winit")]
-        return run_winit_shell(cli);
+        return run_winit_shell(cli, &theme_outcome);
         #[cfg(not(feature = "winit"))]
         unreachable!("should_use_kms requires kms when winit is disabled");
     }
@@ -1054,10 +1123,17 @@ mod tests {
         assert_eq!(ui.get_windows().row_count(), 3);
         assert!(!ui.get_action_deck_visible());
 
-        let work_pill = ui.get_space_pills().row_data(0).unwrap();
+        let work_id = SharedString::from("10000000-0000-4000-8000-000000000001");
+        let work_pill = (0..ui.get_space_pills().row_count())
+            .filter_map(|i| ui.get_space_pills().row_data(i))
+            .find(|p| p.vm_id == work_id)
+            .unwrap();
         assert_eq!(work_pill.network_badge, "NAT · Internet Only");
         assert!(!work_pill.disposable);
-        let disp_pill = ui.get_space_pills().row_data(1).unwrap();
+        let disp_pill = (0..ui.get_space_pills().row_count())
+            .filter_map(|i| ui.get_space_pills().row_data(i))
+            .find(|p| p.vm_id == "10000000-0000-4000-8000-000000000002")
+            .unwrap();
         assert!(disp_pill.disposable);
 
         // Render Workspace + Top Context Rail into software buffer
@@ -1087,12 +1163,18 @@ mod tests {
         assert!(ui.get_selected_vm_disposable());
 
         // Switch to Work Pod (NAT) -> start/stop/delete capture
-        ui.invoke_activate_space(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        ui.invoke_activate_space(work_id.clone());
         assert_eq!(ui.get_selected_vm_network_badge(), "NAT · Internet Only");
-        ui.invoke_start_capture_action(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        ui.invoke_start_capture_action(work_id.clone());
         assert!(ui.get_selected_capture_active());
-        assert!(ui.get_space_pills().row_data(0).unwrap().capturing);
-        ui.invoke_stop_capture_action(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        assert!(
+            (0..ui.get_space_pills().row_count())
+                .filter_map(|i| ui.get_space_pills().row_data(i))
+                .find(|p| p.vm_id == work_id)
+                .unwrap()
+                .capturing
+        );
+        ui.invoke_stop_capture_action(work_id);
         assert!(!ui.get_selected_capture_active());
         let cap_row = ui.get_selected_captures().row_data(0).unwrap();
         ui.invoke_delete_capture_action(cap_row.vm_id, cap_row.capture_id);
@@ -1185,6 +1267,40 @@ mod tests {
         assert!(!err_ui.get_vmm_connected());
         assert!(err_ui.get_vmm_error().contains("SO_PEERCRED"));
         assert!(err_ui.get_vmm_error().contains("hyperos"));
+
+        // Verify C4 data-only JSON themes (Obsidian + Daylight) & origin color isolation
+        let obsidian =
+            desktop_shell::theme::parse_theme_str(desktop_shell::theme::BUILTIN_OBSIDIAN_JSON)
+                .unwrap();
+        let daylight =
+            desktop_shell::theme::parse_theme_str(desktop_shell::theme::BUILTIN_DAYLIGHT_JSON)
+                .unwrap();
+
+        apply_theme_to_ui(&ui, &obsidian);
+        assert_eq!(ui.global::<Theme>().get_id(), "obsidian");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "compact");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 0);
+        let origin_accent_before = ui.get_windows().row_data(0).unwrap().accent;
+        window.draw_if_needed(|r| {
+            r.render(&mut fb, 1280);
+        });
+
+        apply_theme_to_ui(&ui, &daylight);
+        assert_eq!(ui.global::<Theme>().get_id(), "daylight");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "comfortable");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 1);
+        assert_eq!(
+            ui.global::<Theme>().get_window_bg(),
+            Color::from_rgb_u8(226, 232, 240)
+        );
+        assert_eq!(ui.global::<Theme>().get_ui_font_family(), "DejaVu Sans");
+        assert!((ui.global::<Theme>().get_font_base() - 13.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_radius_md() - 12.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_space_md() - 14.0).abs() < 0.01);
+        assert_eq!(
+            ui.get_windows().row_data(0).unwrap().accent,
+            origin_accent_before
+        );
         window.draw_if_needed(|r| {
             r.render(&mut fb, 1280);
         });

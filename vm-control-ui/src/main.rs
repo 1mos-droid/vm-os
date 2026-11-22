@@ -21,6 +21,7 @@ use vm_control_ui::studio::{
     DisplayMode, GuidedSettings, MemoryProfile, NetworkPreset, StoreTemplate, TemplateStatus,
 };
 use vm_control_ui::templates::{discover_templates, GuestTemplate};
+use vm_control_ui::theme::{load_theme_or_fallback, parse_hex_rgb, resolve_theme_path, ThemeFile};
 
 slint::include_modules!();
 
@@ -30,6 +31,7 @@ struct CliConfig {
     mock: bool,
     socket_path: PathBuf,
     base_images_dir: PathBuf,
+    theme: Option<PathBuf>,
 }
 
 impl Default for CliConfig {
@@ -38,6 +40,7 @@ impl Default for CliConfig {
             mock: false,
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             base_images_dir: PathBuf::from(BASE_IMAGES_DIR),
+            theme: None,
         }
     }
 }
@@ -89,6 +92,12 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
                 })?;
                 cfg.base_images_dir = PathBuf::from(path);
             }
+            "--theme" => {
+                let path = args.next().ok_or_else(|| {
+                    "--theme requires a JSON theme file path argument".to_string()
+                })?;
+                cfg.theme = Some(PathBuf::from(path));
+            }
             "-h" | "--help" => {
                 println!(
                     "HyperOS Zero-Script VM Studio (vm-control-ui)\n\
@@ -100,6 +109,7 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
                        --mock                 Run with an in-memory mock VMM backend\n\
                        --socket <PATH>        Unix domain socket path (default: {DEFAULT_SOCKET_PATH})\n\
                        --base-images <DIR>    Base images directory (default: {BASE_IMAGES_DIR})\n\
+                       --theme <PATH>         Load a JSON token theme file (or set HYPEROS_THEME)\n\
                        -h, --help             Print this help message"
                 );
                 return Ok(None);
@@ -111,6 +121,43 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
     }
 
     Ok(Some(cfg))
+}
+
+fn theme_color(hex: &str) -> Color {
+    let (r, g, b) = parse_hex_rgb(hex).expect("validated ThemeFile must hold #RRGGBB colors");
+    Color::from_rgb_u8(r, g, b)
+}
+
+fn apply_theme_to_ui(ui: &MainWindow, theme: &ThemeFile) {
+    let g = ui.global::<Theme>();
+    g.set_id(SharedString::from(theme.id.as_str()));
+    g.set_name(SharedString::from(theme.name.as_str()));
+    g.set_layout_preset(SharedString::from(theme.layout_preset.as_str()));
+    g.set_density_level(theme.layout_preset.density_level());
+    g.set_window_bg(theme_color(&theme.colors.window_bg));
+    g.set_canvas_bg(theme_color(&theme.colors.canvas_bg));
+    g.set_surface_bg(theme_color(&theme.colors.surface_bg));
+    g.set_surface_elevated(theme_color(&theme.colors.surface_elevated));
+    g.set_border(theme_color(&theme.colors.border));
+    g.set_text_primary(theme_color(&theme.colors.text_primary));
+    g.set_text_secondary(theme_color(&theme.colors.text_secondary));
+    g.set_text_muted(theme_color(&theme.colors.text_muted));
+    g.set_accent(theme_color(&theme.colors.accent));
+    g.set_danger(theme_color(&theme.colors.danger));
+    g.set_success(theme_color(&theme.colors.success));
+    g.set_ui_font_family(SharedString::from(theme.fonts.ui_family.as_str()));
+    g.set_mono_font_family(SharedString::from(theme.fonts.mono_family.as_str()));
+    g.set_font_base(theme.fonts.base_size_px as f32);
+    g.set_font_heading(theme.fonts.heading_size_px as f32);
+    g.set_radius_sm(theme.radii.sm_px as f32);
+    g.set_radius_md(theme.radii.md_px as f32);
+    g.set_radius_lg(theme.radii.lg_px as f32);
+    g.set_radius_pill(theme.radii.pill_px as f32);
+    g.set_space_xs(theme.spacing.xs_px as f32);
+    g.set_space_sm(theme.spacing.sm_px as f32);
+    g.set_space_md(theme.spacing.md_px as f32);
+    g.set_space_lg(theme.spacing.lg_px as f32);
+    g.invoke_sync_palette(!theme.is_light_surface());
 }
 
 fn vm_accent_color(vm: &Vm) -> Color {
@@ -1023,6 +1070,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    let env_theme = std::env::var("HYPEROS_THEME").ok();
+    let theme_path = resolve_theme_path(cfg.theme.as_deref(), env_theme.as_deref());
+    let theme_outcome = load_theme_or_fallback(theme_path.as_deref());
+    if let Some(ref warning) = theme_outcome.warning {
+        eprintln!("vm-control-ui: {warning}");
+    }
+
     let backend: Box<dyn VmmBackend> = if cfg.mock {
         Box::new(MockVmmBackend::with_sample_vms())
     } else {
@@ -1031,7 +1085,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let templates = discover_templates(&cfg.base_images_dir, cfg.mock);
     let ui = MainWindow::new()?;
+    apply_theme_to_ui(&ui, &theme_outcome.theme);
     let state = wire_ui(&ui, cfg.mock, backend, templates);
+    if let Some(warning) = theme_outcome.warning {
+        if !ui.get_status_is_error() {
+            set_status(&ui, warning, true);
+        }
+    }
 
     // Periodic host RAM / ZRAM telemetry & active mock capture counter refresh every 2 seconds
     let metrics_timer = Timer::default();
@@ -1222,6 +1282,41 @@ mod tests {
         ui.set_settings_display_scale(125);
         ui.invoke_settings_changed();
         assert!(ui.get_cow_headline().contains("GiB saved"));
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut frame_buf, 1100);
+        });
+
+        // 6. C4 Data Themes: Obsidian & Daylight switch + origin color isolation
+        let obsidian =
+            vm_control_ui::theme::parse_theme_str(vm_control_ui::theme::BUILTIN_OBSIDIAN_JSON)
+                .unwrap();
+        let daylight =
+            vm_control_ui::theme::parse_theme_str(vm_control_ui::theme::BUILTIN_DAYLIGHT_JSON)
+                .unwrap();
+
+        ui.set_active_tab(0);
+        apply_theme_to_ui(&ui, &obsidian);
+        assert_eq!(ui.global::<Theme>().get_id(), "obsidian");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "compact");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 0);
+        let origin_before = ui.get_vms().row_data(0).unwrap().accent;
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut frame_buf, 1100);
+        });
+
+        apply_theme_to_ui(&ui, &daylight);
+        assert_eq!(ui.global::<Theme>().get_id(), "daylight");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "comfortable");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 1);
+        assert_eq!(
+            ui.global::<Theme>().get_window_bg(),
+            Color::from_rgb_u8(226, 232, 240)
+        );
+        assert_eq!(ui.global::<Theme>().get_ui_font_family(), "DejaVu Sans");
+        assert!((ui.global::<Theme>().get_font_base() - 13.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_radius_md() - 12.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_space_md() - 14.0).abs() < 0.01);
+        assert_eq!(ui.get_vms().row_data(0).unwrap().accent, origin_before);
         window.draw_if_needed(|renderer| {
             renderer.render(&mut frame_buf, 1100);
         });

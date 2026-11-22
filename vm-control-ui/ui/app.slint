@@ -1,4 +1,4 @@
-import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, Palette, ScrollView, Slider } from "std-widgets.slint";
 
 export struct VmItem {
     vm-id: string,
@@ -68,7 +68,7 @@ component MeterBar inherits Rectangle {
     in property <color> fill-color: #06b6d4;
     height: 9px;
     border-radius: 5px;
-    background: #111827;
+    background: Theme.surface-elevated;
     clip: true;
 
     Rectangle {
@@ -104,13 +104,54 @@ component PillBadge inherits Rectangle {
     }
 }
 
+export global Theme {
+    in-out property <string> id: "obsidian";
+    in-out property <string> name: "HyperOS Obsidian";
+    in-out property <string> layout-preset: "compact";
+    in-out property <int> density-level: 0;
+
+    in-out property <color> window-bg: #090d16;
+    in-out property <color> canvas-bg: #0f172a;
+    in-out property <color> surface-bg: #111827;
+    in-out property <color> surface-elevated: #162033;
+    in-out property <color> border: #243247;
+    in-out property <color> text-primary: #f8fafc;
+    in-out property <color> text-secondary: #cbd5e1;
+    in-out property <color> text-muted: #94a3b8;
+    in-out property <color> accent: #06b6d4;
+    in-out property <color> danger: #ef4444;
+    in-out property <color> success: #10b981;
+
+    in-out property <string> ui-font-family: "DejaVu Sans";
+    in-out property <string> mono-font-family: "DejaVu Sans Mono";
+    in-out property <length> font-base: 12px;
+    in-out property <length> font-heading: 18px;
+
+    in-out property <length> radius-sm: 8px;
+    in-out property <length> radius-md: 10px;
+    in-out property <length> radius-lg: 16px;
+    in-out property <length> radius-pill: 15px;
+
+    in-out property <length> space-xs: 6px;
+    in-out property <length> space-sm: 8px;
+    in-out property <length> space-md: 12px;
+    in-out property <length> space-lg: 16px;
+
+    public function sync-palette(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "HyperOS — Zero-Script VM Studio";
     preferred-width: 1100px;
     preferred-height: 780px;
     min-width: 880px;
     min-height: 620px;
-    background: #090d16;
+    default-font-family: Theme.ui-font-family;
+    default-font-size: Theme.font-base;
+    background: Theme.window-bg;
+    init => { Palette.color-scheme = ColorScheme.dark; }
 
     // Navigation: 0 = Spaces, 1 = Create Space, 2 = Template Store, 3 = Guided Settings
     in-out property <int> active-tab: 0;
@@ -197,21 +238,21 @@ export component MainWindow inherits Window {
     callback settings-changed();
 
     VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
+        padding: Theme.space-lg;
+        spacing: Theme.space-md;
 
         // ================= TOP STUDIO RAIL =================
         Rectangle {
             height: 56px;
-            border-radius: 12px;
-            background: #111827;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-bg;
             border-width: 1px;
-            border-color: #243247;
+            border-color: Theme.border;
 
             HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 12px;
+                padding-left: Theme.space-lg;
+                padding-right: Theme.space-lg;
+                spacing: Theme.space-md;
                 alignment: space-between;
 
                 HorizontalLayout {
@@ -220,24 +261,25 @@ export component MainWindow inherits Window {
 
                     Text {
                         text: "HyperOS Studio";
-                        color: #f8fafc;
-                        font-size: 17px;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-heading;
                         font-weight: 800;
                         vertical-alignment: center;
                     }
 
                     HorizontalLayout {
-                        spacing: 6px;
+                        spacing: Theme.space-xs;
                         Rectangle {
                             width: 9px;
                             height: 9px;
                             y: 23px;
                             border-radius: 5px;
-                            background: root.backend-connected ? #10b981 : #ef4444;
+                            background: root.backend-connected ? Theme.success : Theme.danger;
                         }
                         Text {
                             text: root.backend-label;
-                            color: #94a3b8;
+                            color: Theme.text-muted;
+                            font-family: Theme.mono-font-family;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -305,62 +347,62 @@ export component MainWindow inherits Window {
 
         // ================= TAB 0: SPACES & VISUAL CHECKPOINTS =================
         if root.active-tab == 0 : VerticalLayout {
-            spacing: 12px;
+            spacing: Theme.space-md;
             vertical-stretch: 1;
 
             // Live Memory Strip + Reclaim RAM
             HorizontalLayout {
-                spacing: 10px;
+                spacing: Theme.space-sm;
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    border-radius: 10px;
-                    background: #111827;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-bg;
                     border-width: 1px;
-                    border-color: #243247;
+                    border-color: Theme.border;
 
                     VerticalLayout {
-                        padding: 12px;
+                        padding: Theme.space-md;
                         spacing: 7px;
                         HorizontalLayout {
                             alignment: space-between;
-                            Text { text: "Host Memory"; color: #94a3b8; font-size: 12px; font-weight: 600; }
-                            Text { text: root.ram-summary; color: #f8fafc; font-size: 13px; font-weight: 700; }
+                            Text { text: "Host Memory"; color: Theme.text-muted; font-size: Theme.font-base; font-weight: 600; }
+                            Text { text: root.ram-summary; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
                         }
                         MeterBar {
                             ratio: root.ram-usage-ratio;
-                            fill-color: root.ram-usage-ratio > 0.85 ? #ef4444 : root.ram-usage-ratio > 0.65 ? #f59e0b : #06b6d4;
+                            fill-color: root.ram-usage-ratio > 0.85 ? Theme.danger : root.ram-usage-ratio > 0.65 ? #f59e0b : Theme.accent;
                         }
-                        Text { text: root.ram-detail; color: #64748b; font-size: 11px; }
+                        Text { text: root.ram-detail; color: Theme.text-muted; font-size: 11px; }
                     }
                 }
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    border-radius: 10px;
-                    background: #111827;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-bg;
                     border-width: 1px;
-                    border-color: #243247;
+                    border-color: Theme.border;
 
                     VerticalLayout {
-                        padding: 12px;
+                        padding: Theme.space-md;
                         spacing: 7px;
                         HorizontalLayout {
                             alignment: space-between;
-                            Text { text: "Compressed Memory (ZRAM)"; color: #94a3b8; font-size: 12px; font-weight: 600; }
-                            Text { text: root.zram-summary; color: #f8fafc; font-size: 13px; font-weight: 700; }
+                            Text { text: "Compressed Memory (ZRAM)"; color: Theme.text-muted; font-size: Theme.font-base; font-weight: 600; }
+                            Text { text: root.zram-summary; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
                         }
                         MeterBar { ratio: root.zram-usage-ratio; fill-color: #8b5cf6; }
-                        Text { text: root.zram-detail; color: #64748b; font-size: 11px; }
+                        Text { text: root.zram-detail; color: Theme.text-muted; font-size: 11px; }
                     }
                 }
 
                 Rectangle {
                     width: 165px;
-                    border-radius: 10px;
+                    border-radius: Theme.radius-md;
                     background: #064e3b;
                     border-width: 1px;
-                    border-color: #10b981;
+                    border-color: Theme.success;
 
                     TouchArea {
                         clicked => { root.reclaim-ram-requested(); }
@@ -393,36 +435,36 @@ export component MainWindow inherits Window {
                 vertical-stretch: 1;
 
                 VerticalLayout {
-                    spacing: 12px;
+                    spacing: Theme.space-md;
                     alignment: start;
 
                     HorizontalLayout {
                         alignment: space-between;
                         Text {
                             text: "Your Spaces (" + root.vms.length + ")";
-                            color: #f8fafc;
+                            color: Theme.text-primary;
                             font-size: 15px;
                             font-weight: 700;
                         }
                         Text {
                             text: "Every Space is isolated with its own colored window border";
-                            color: #64748b;
+                            color: Theme.text-muted;
                             font-size: 11px;
                         }
                     }
 
                     if root.vms.length == 0 : Rectangle {
                         height: 140px;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
                         VerticalLayout {
                             alignment: center;
                             spacing: 10px;
                             Text {
                                 text: "No Spaces yet — create one in plain English in seconds.";
-                                color: #cbd5e1;
+                                color: Theme.text-secondary;
                                 font-size: 14px;
                                 horizontal-alignment: center;
                             }
@@ -438,26 +480,26 @@ export component MainWindow inherits Window {
                     }
 
                     for vm in root.vms : Rectangle {
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 2px;
                         border-color: vm.accent;
 
                         VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
+                            padding: Theme.space-md;
+                            spacing: Theme.space-sm;
 
                             HorizontalLayout {
                                 alignment: space-between;
-                                spacing: 12px;
+                                spacing: Theme.space-md;
 
                                 VerticalLayout {
                                     spacing: 5px;
                                     HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: Theme.space-sm;
                                         Text {
                                             text: vm.name;
-                                            color: #f8fafc;
+                                            color: Theme.text-primary;
                                             font-size: 15px;
                                             font-weight: 700;
                                             vertical-alignment: center;
@@ -486,8 +528,8 @@ export component MainWindow inherits Window {
 
                                     Text {
                                         text: "Template: " + vm.base-image-id + "  •  " + vm.vcpu-count + " vCPU  •  Active RAM: " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB  •  Snapshots: " + (vm.disposable ? "Disabled" : vm.checkpoint-count);
-                                        color: #94a3b8;
-                                        font-size: 12px;
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-base;
                                     }
                                 }
 
@@ -531,10 +573,10 @@ export component MainWindow inherits Window {
                                 spacing: 8px;
 
                                 if vm.state == "running" : HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: Theme.space-xs;
                                     Text {
                                         text: "Memory Balloon:";
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
@@ -555,10 +597,10 @@ export component MainWindow inherits Window {
                                 }
 
                                 if vm.state == "stopped" : HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: Theme.space-xs;
                                     Text {
                                         text: "Network:";
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
@@ -581,7 +623,7 @@ export component MainWindow inherits Window {
 
                                 // Packet Capture status & Start/Stop trigger
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: Theme.space-xs;
                                     alignment: end;
 
                                     PillBadge {
@@ -605,22 +647,22 @@ export component MainWindow inherits Window {
 
                     // Saved Snapshots (List / Restore with data-loss modal / Delete)
                     if root.checkpoints.length > 0 : VerticalLayout {
-                        spacing: 8px;
+                        spacing: Theme.space-sm;
                         Text {
                             text: "Saved Snapshots (" + root.checkpoints.length + ")";
-                            color: #f8fafc;
+                            color: Theme.text-primary;
                             font-size: 14px;
                             font-weight: 700;
                         }
 
                         for cp in root.checkpoints : Rectangle {
-                            border-radius: 8px;
-                            background: #162033;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.surface-elevated;
                             border-width: 1px;
-                            border-color: #243247;
+                            border-color: Theme.border;
 
                             HorizontalLayout {
-                                padding: 12px;
+                                padding: Theme.space-md;
                                 alignment: space-between;
                                 spacing: 10px;
 
@@ -628,19 +670,20 @@ export component MainWindow inherits Window {
                                     spacing: 2px;
                                     Text {
                                         text: cp.vm-name + " — " + cp.label;
-                                        color: #f8fafc;
+                                        color: Theme.text-primary;
                                         font-size: 13px;
                                         font-weight: 700;
                                     }
                                     Text {
                                         text: "Created " + cp.created-at + "  •  Read-only Btrfs snapshot " + cp.short-snap-id + (cp.vm-stopped ? "" : "  •  Stop VM to restore");
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
+                                        font-family: Theme.mono-font-family;
                                         font-size: 11px;
                                     }
                                 }
 
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: Theme.space-xs;
                                     Button {
                                         text: "↺ Restore";
                                         enabled: cp.vm-stopped;
@@ -663,32 +706,32 @@ export component MainWindow inherits Window {
 
                     // Packet Captures (List & Delete)
                     if root.captures.length > 0 : VerticalLayout {
-                        spacing: 8px;
+                        spacing: Theme.space-sm;
                         Text {
                             text: "Packet Captures (" + root.captures.length + ")";
-                            color: #f8fafc;
+                            color: Theme.text-primary;
                             font-size: 14px;
                             font-weight: 700;
                         }
 
                         for cap in root.captures : Rectangle {
-                            border-radius: 8px;
-                            background: #162033;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.surface-elevated;
                             border-width: 1px;
-                            border-color: cap.state == "running" ? #10b981 : cap.state == "limit_reached" ? #f59e0b : #243247;
+                            border-color: cap.state == "running" ? Theme.success : cap.state == "limit_reached" ? #f59e0b : Theme.border;
 
                             HorizontalLayout {
-                                padding: 12px;
+                                padding: Theme.space-md;
                                 alignment: space-between;
                                 spacing: 10px;
 
                                 VerticalLayout {
                                     spacing: 3px;
                                     HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: Theme.space-sm;
                                         Text {
                                             text: cap.vm-name + " — Capture " + cap.short-capture-id;
-                                            color: #f8fafc;
+                                            color: Theme.text-primary;
                                             font-size: 13px;
                                             font-weight: 700;
                                             vertical-alignment: center;
@@ -706,7 +749,8 @@ export component MainWindow inherits Window {
                                     }
                                     Text {
                                         text: "Started " + cap.started-at + "  •  " + cap.pcap-hint;
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
+                                        font-family: Theme.mono-font-family;
                                         font-size: 11px;
                                     }
                                 }
@@ -732,32 +776,32 @@ export component MainWindow inherits Window {
                 padding-right: 8px;
 
                 Rectangle {
-                    border-radius: 12px;
-                    background: #111827;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-bg;
                     border-width: 1px;
-                    border-color: #243247;
+                    border-color: Theme.border;
 
                     VerticalLayout {
-                        padding: 18px;
+                        padding: Theme.space-lg;
                         spacing: 14px;
 
                         Text {
                             text: "Create a New Space";
-                            color: #f8fafc;
-                            font-size: 18px;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-heading;
                             font-weight: 800;
                         }
                         Text {
                             text: "No scripts or terminal commands — pick what this Space should do and HyperOS configures Btrfs CoW cloning, memory ballooning, and network sandboxing automatically.";
-                            color: #94a3b8;
-                            font-size: 12px;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-base;
                             wrap: word-wrap;
                         }
 
                         // Step 1: Name
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "1. Give your Space a name"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                            Text { text: "1. Give your Space a name"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                             LineEdit {
                                 placeholder-text: "e.g. Banking Vault, Travel Browser, Study Pod";
                                 text <=> root.wizard-name;
@@ -766,24 +810,24 @@ export component MainWindow inherits Window {
 
                         // Step 2: Base Template
                         VerticalLayout {
-                            spacing: 6px;
-                            Text { text: "2. Choose a ready-to-use Base Template"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                            spacing: Theme.space-xs;
+                            Text { text: "2. Choose a ready-to-use Base Template"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
                                 for tpl[idx] in root.templates : Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-template-index == idx ? #0f2942 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-template-index == idx ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-template-index == idx ? 2px : 1px;
-                                    border-color: root.wizard-template-index == idx ? #06b6d4 : #243247;
+                                    border-color: root.wizard-template-index == idx ? Theme.accent : Theme.border;
 
                                     TouchArea { clicked => { root.select-template(idx); } }
 
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 4px;
-                                        Text { text: tpl.label; color: #f8fafc; font-size: 13px; font-weight: 700; wrap: word-wrap; }
-                                        Text { text: tpl.description; color: #94a3b8; font-size: 11px; wrap: word-wrap; }
+                                        Text { text: tpl.label; color: Theme.text-primary; font-size: 13px; font-weight: 700; wrap: word-wrap; }
+                                        Text { text: tpl.description; color: Theme.text-muted; font-size: 11px; wrap: word-wrap; }
                                     }
                                 }
                             }
@@ -791,56 +835,56 @@ export component MainWindow inherits Window {
 
                         // Step 3: Network Access (Plain-English Cards)
                         VerticalLayout {
-                            spacing: 6px;
-                            Text { text: "3. Network Access"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                            spacing: Theme.space-xs;
+                            Text { text: "3. Network Access"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
 
                                 // Offline Vault (isolated)
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-network-mode == 0 ? #451a03 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-network-mode == 0 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-network-mode == 0 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 0 ? #f59e0b : #243247;
+                                    border-color: root.wizard-network-mode == 0 ? #f59e0b : Theme.border;
                                     TouchArea { clicked => { root.wizard-network-mode = 0; } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 4px;
-                                        Text { text: "Offline Vault"; color: #fcd34d; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Zero internet or local network. Ideal for private files and keys."; color: #cbd5e1; font-size: 11px; wrap: word-wrap; }
+                                        Text { text: "Offline Vault"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
+                                        Text { text: "Zero internet or local network. Ideal for private files and keys."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
                                     }
                                 }
 
                                 // NAT (Internet Only)
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-network-mode == 1 ? #083344 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-network-mode == 1 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-network-mode == 1 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 1 ? #06b6d4 : #243247;
+                                    border-color: root.wizard-network-mode == 1 ? Theme.accent : Theme.border;
                                     TouchArea { clicked => { root.wizard-network-mode = 1; } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 4px;
-                                        Text { text: "NAT · Internet Only"; color: #67e8f9; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Public internet only. Local LAN, host, and other Spaces are blocked."; color: #cbd5e1; font-size: 11px; wrap: word-wrap; }
+                                        Text { text: "NAT · Internet Only"; color: Theme.accent; font-size: 13px; font-weight: 700; }
+                                        Text { text: "Public internet only. Local LAN, host, and other Spaces are blocked."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
                                     }
                                 }
 
                                 // Home Network (host-only)
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-network-mode == 2 ? #2e1065 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-network-mode == 2 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-network-mode == 2 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 2 ? #8b5cf6 : #243247;
+                                    border-color: root.wizard-network-mode == 2 ? #8b5cf6 : Theme.border;
                                     TouchArea { clicked => { root.wizard-network-mode = 2; } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 4px;
-                                        Text { text: "Home Network"; color: #c4b5fd; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Private link to this computer only. No internet access."; color: #cbd5e1; font-size: 11px; wrap: word-wrap; }
+                                        Text { text: "Home Network"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
+                                        Text { text: "Private link to this computer only. No internet access."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
                                     }
                                 }
                             }
@@ -848,73 +892,73 @@ export component MainWindow inherits Window {
 
                         // Step 4: Memory Profile (Light / Standard / Heavy mapped to virtio-balloon)
                         VerticalLayout {
-                            spacing: 6px;
-                            Text { text: "4. Memory Profile (automatic virtio-balloon sizing)"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                            spacing: Theme.space-xs;
+                            Text { text: "4. Memory Profile (automatic virtio-balloon sizing)"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
 
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-memory-profile == 0 ? #064e3b : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-memory-profile == 0 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-memory-profile == 0 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 0 ? #10b981 : #243247;
+                                    border-color: root.wizard-memory-profile == 0 ? Theme.success : Theme.border;
                                     TouchArea { clicked => { root.select-memory-profile(0); } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 3px;
-                                        Text { text: "Light"; color: #6ee7b7; font-size: 13px; font-weight: 700; }
-                                        Text { text: "256 → 512 MiB · 1 vCPU"; color: #e2e8f0; font-size: 11px; }
-                                        Text { text: "Notes, vaults, lightweight tools"; color: #94a3b8; font-size: 10px; }
+                                        Text { text: "Light"; color: Theme.success; font-size: 13px; font-weight: 700; }
+                                        Text { text: "256 → 512 MiB · 1 vCPU"; color: Theme.text-secondary; font-size: 11px; }
+                                        Text { text: "Notes, vaults, lightweight tools"; color: Theme.text-muted; font-size: 10px; }
                                     }
                                 }
 
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-memory-profile == 1 ? #0f2942 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-memory-profile == 1 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-memory-profile == 1 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 1 ? #38bdf8 : #243247;
+                                    border-color: root.wizard-memory-profile == 1 ? Theme.accent : Theme.border;
                                     TouchArea { clicked => { root.select-memory-profile(1); } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 3px;
-                                        Text { text: "Standard"; color: #7dd3fc; font-size: 13px; font-weight: 700; }
-                                        Text { text: "512 → 1024 MiB · 2 vCPUs"; color: #e2e8f0; font-size: 11px; }
-                                        Text { text: "Browsing, office, everyday apps"; color: #94a3b8; font-size: 10px; }
+                                        Text { text: "Standard"; color: Theme.accent; font-size: 13px; font-weight: 700; }
+                                        Text { text: "512 → 1024 MiB · 2 vCPUs"; color: Theme.text-secondary; font-size: 11px; }
+                                        Text { text: "Browsing, office, everyday apps"; color: Theme.text-muted; font-size: 10px; }
                                     }
                                 }
 
                                 Rectangle {
                                     horizontal-stretch: 1;
-                                    border-radius: 8px;
-                                    background: root.wizard-memory-profile == 2 ? #3b0764 : #0b1120;
+                                    border-radius: Theme.radius-sm;
+                                    background: root.wizard-memory-profile == 2 ? Theme.surface-elevated : Theme.canvas-bg;
                                     border-width: root.wizard-memory-profile == 2 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 2 ? #a855f7 : #243247;
+                                    border-color: root.wizard-memory-profile == 2 ? #a855f7 : Theme.border;
                                     TouchArea { clicked => { root.select-memory-profile(2); } }
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 3px;
-                                        Text { text: "Heavy"; color: #d8b4fe; font-size: 13px; font-weight: 700; }
-                                        Text { text: "1024 → 2048 MiB · up to 4 vCPUs"; color: #e2e8f0; font-size: 11px; }
-                                        Text { text: "Media, coding, large workspaces"; color: #94a3b8; font-size: 10px; }
+                                        Text { text: "Heavy"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
+                                        Text { text: "1024 → 2048 MiB · up to 4 vCPUs"; color: Theme.text-secondary; font-size: 11px; }
+                                        Text { text: "Media, coding, large workspaces"; color: Theme.text-muted; font-size: 10px; }
                                     }
                                 }
                             }
 
                             // Optional fine-tune balloon range readout + sliders
                             Rectangle {
-                                border-radius: 8px;
-                                background: #0b1120;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.canvas-bg;
                                 border-width: 1px;
-                                border-color: #1e293b;
+                                border-color: Theme.border;
                                 VerticalLayout {
                                     padding: 10px;
-                                    spacing: 6px;
+                                    spacing: Theme.space-xs;
                                     HorizontalLayout {
                                         alignment: space-between;
-                                        Text { text: "Max Ceiling (create_vm.ram_mib): " + root.wizard-max-ram-mib + " MiB"; color: #94a3b8; font-size: 11px; }
-                                        Text { text: "Idle Balloon Target: " + root.wizard-min-ram-mib + " MiB  •  " + root.wizard-vcpu-count + " vCPU"; color: #38bdf8; font-size: 11px; }
+                                        Text { text: "Max Ceiling (create_vm.ram_mib): " + root.wizard-max-ram-mib + " MiB"; color: Theme.text-muted; font-size: 11px; }
+                                        Text { text: "Idle Balloon Target: " + root.wizard-min-ram-mib + " MiB  •  " + root.wizard-vcpu-count + " vCPU"; color: Theme.accent; font-size: 11px; }
                                     }
                                     Slider {
                                         minimum: 128;
@@ -937,16 +981,16 @@ export component MainWindow inherits Window {
 
                             Rectangle {
                                 horizontal-stretch: 1;
-                                border-radius: 8px;
-                                background: #0b1120;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.canvas-bg;
                                 border-width: 1px;
-                                border-color: #243247;
+                                border-color: Theme.border;
                                 VerticalLayout {
-                                    padding: 12px;
-                                    spacing: 8px;
-                                    Text { text: "5. Display Mode"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                                    padding: Theme.space-md;
+                                    spacing: Theme.space-sm;
+                                    Text { text: "5. Display Mode"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                                     HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: Theme.space-sm;
                                         Button {
                                             text: "Seamless App Window";
                                             primary: root.wizard-display-mode == 0;
@@ -962,7 +1006,7 @@ export component MainWindow inherits Window {
                                         text: root.wizard-display-mode == 0
                                             ? "Apps appear directly on your HyperOS Workspace with a 2px colored origin border."
                                             : "Opens as a self-contained virtual desktop window.";
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
                                         font-size: 11px;
                                         wrap: word-wrap;
                                     }
@@ -971,21 +1015,21 @@ export component MainWindow inherits Window {
 
                             Rectangle {
                                 horizontal-stretch: 1;
-                                border-radius: 8px;
-                                background: #0b1120;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.canvas-bg;
                                 border-width: 1px;
-                                border-color: root.wizard-disposable ? #ea580c : #243247;
+                                border-color: root.wizard-disposable ? #ea580c : Theme.border;
                                 VerticalLayout {
-                                    padding: 12px;
-                                    spacing: 6px;
-                                    Text { text: "6. Lifecycle Safety"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
+                                    padding: Theme.space-md;
+                                    spacing: Theme.space-xs;
+                                    Text { text: "6. Lifecycle Safety"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
                                     CheckBox {
                                         text: "Disposable (reset disk on stop)";
                                         checked <=> root.wizard-disposable;
                                     }
                                     Text {
                                         text: "Writable CoW disk resets to its base on every stop or crash; snapshots are disabled for this Space.";
-                                        color: #94a3b8;
+                                        color: Theme.text-muted;
                                         font-size: 11px;
                                         wrap: word-wrap;
                                     }
@@ -1009,41 +1053,41 @@ export component MainWindow inherits Window {
             vertical-stretch: 1;
 
             VerticalLayout {
-                spacing: 12px;
+                spacing: Theme.space-md;
                 padding-right: 8px;
 
                 Text {
                     text: "Template Store";
-                    color: #f8fafc;
-                    font-size: 18px;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-heading;
                     font-weight: 800;
                 }
                 Text {
                     text: "One-click download and SHA-256 verification into /var/lib/hyperos/base-images/. Spaces clone from these templates instantly with zero initial disk overhead.";
-                    color: #94a3b8;
-                    font-size: 12px;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-base;
                     wrap: word-wrap;
                 }
 
                 for card in root.store-cards : Rectangle {
-                    border-radius: 10px;
-                    background: #111827;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-bg;
                     border-width: 1px;
-                    border-color: card.installed ? #10b981 : card.busy ? #06b6d4 : #243247;
+                    border-color: card.installed ? Theme.success : card.busy ? Theme.accent : Theme.border;
 
                     VerticalLayout {
-                        padding: 14px;
-                        spacing: 8px;
+                        padding: Theme.space-md;
+                        spacing: Theme.space-sm;
 
                         HorizontalLayout {
                             alignment: space-between;
-                            spacing: 12px;
+                            spacing: Theme.space-md;
 
                             VerticalLayout {
                                 spacing: 4px;
                                 HorizontalLayout {
-                                    spacing: 8px;
-                                    Text { text: card.title; color: #f8fafc; font-size: 15px; font-weight: 700; }
+                                    spacing: Theme.space-sm;
+                                    Text { text: card.title; color: Theme.text-primary; font-size: 15px; font-weight: 700; }
                                     PillBadge {
                                         text: card.status-label;
                                         bg: card.installed ? #065f46 : card.busy ? #083344 : #1e293b;
@@ -1051,12 +1095,12 @@ export component MainWindow inherits Window {
                                     }
                                     PillBadge { text: card.download-label; bg: #1e293b; fg: #94a3b8; }
                                 }
-                                Text { text: card.summary; color: #94a3b8; font-size: 12px; wrap: word-wrap; }
+                                Text { text: card.summary; color: Theme.text-muted; font-size: Theme.font-base; wrap: word-wrap; }
                             }
 
                             HorizontalLayout {
                                 alignment: end;
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
                                 if !card.installed : Button {
                                     text: card.busy ? "Provisioning (" + card.progress-pct + "%)" : "Download & Provision";
                                     enabled: !card.busy;
@@ -1073,7 +1117,7 @@ export component MainWindow inherits Window {
 
                         if card.busy || card.installed : MeterBar {
                             ratio: card.progress-ratio;
-                            fill-color: card.installed ? #10b981 : #06b6d4;
+                            fill-color: card.installed ? Theme.success : Theme.accent;
                         }
                     }
                 }
@@ -1085,38 +1129,38 @@ export component MainWindow inherits Window {
             vertical-stretch: 1;
 
             VerticalLayout {
-                spacing: 12px;
+                spacing: Theme.space-md;
                 padding-right: 8px;
 
                 Text {
                     text: "Guided Settings";
-                    color: #f8fafc;
-                    font-size: 18px;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-heading;
                     font-weight: 800;
                 }
 
                 // Wi-Fi & Sound Row
                 HorizontalLayout {
-                    spacing: 12px;
+                    spacing: Theme.space-md;
 
                     Rectangle {
                         horizontal-stretch: 1;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
                         VerticalLayout {
                             padding: 14px;
                             spacing: 10px;
-                            Text { text: "Wi-Fi & Isolation"; color: #f8fafc; font-size: 14px; font-weight: 700; }
+                            Text { text: "Wi-Fi & Isolation"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
                             Text {
                                 text: root.settings-airplane-isolation
                                     ? "Airplane Isolation active — all radios off"
                                     : root.settings-wifi-enabled
                                     ? "Connected to " + root.settings-wifi-name
                                     : "Wi-Fi disabled";
-                                color: #94a3b8;
-                                font-size: 12px;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-base;
                             }
                             CheckBox {
                                 text: "Enable Wi-Fi";
@@ -1133,17 +1177,17 @@ export component MainWindow inherits Window {
 
                     Rectangle {
                         horizontal-stretch: 1;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
                         VerticalLayout {
                             padding: 14px;
                             spacing: 10px;
                             HorizontalLayout {
                                 alignment: space-between;
-                                Text { text: "Sound & PipeWire"; color: #f8fafc; font-size: 14px; font-weight: 700; }
-                                Text { text: root.settings-sound-muted ? "Muted" : root.settings-sound-volume + "%"; color: #38bdf8; font-size: 12px; font-weight: 700; }
+                                Text { text: "Sound & PipeWire"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
+                                Text { text: root.settings-sound-muted ? "Muted" : root.settings-sound-volume + "%"; color: Theme.accent; font-size: Theme.font-base; font-weight: 700; }
                             }
                             Slider {
                                 minimum: 0;
@@ -1170,20 +1214,20 @@ export component MainWindow inherits Window {
 
                 // Display Scaling & Btrfs CoW Storage Savings Row
                 HorizontalLayout {
-                    spacing: 12px;
+                    spacing: Theme.space-md;
 
                     Rectangle {
                         horizontal-stretch: 1;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
                         VerticalLayout {
                             padding: 14px;
                             spacing: 10px;
-                            Text { text: "Display & Scaling"; color: #f8fafc; font-size: 14px; font-weight: 700; }
+                            Text { text: "Display & Scaling"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
                                 Button {
                                     text: "100% Standard";
                                     primary: root.settings-display-scale == 100;
@@ -1210,17 +1254,17 @@ export component MainWindow inherits Window {
 
                     Rectangle {
                         horizontal-stretch: 1;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #10b981;
+                        border-color: Theme.success;
                         VerticalLayout {
                             padding: 14px;
                             spacing: 10px;
-                            Text { text: "Btrfs CoW Storage Savings"; color: #6ee7b7; font-size: 14px; font-weight: 700; }
-                            Text { text: root.cow-headline; color: #f8fafc; font-size: 15px; font-weight: 800; }
-                            MeterBar { ratio: root.cow-savings-ratio; fill-color: #10b981; }
-                            Text { text: root.cow-detail; color: #94a3b8; font-size: 11px; wrap: word-wrap; }
+                            Text { text: "Btrfs CoW Storage Savings"; color: Theme.success; font-size: 14px; font-weight: 700; }
+                            Text { text: root.cow-headline; color: Theme.text-primary; font-size: 15px; font-weight: 800; }
+                            MeterBar { ratio: root.cow-savings-ratio; fill-color: Theme.success; }
+                            Text { text: root.cow-detail; color: Theme.text-muted; font-size: 11px; wrap: word-wrap; }
                         }
                     }
                 }
@@ -1242,25 +1286,25 @@ export component MainWindow inherits Window {
             width: 480px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            border-radius: 12px;
-            background: #111827;
-            border-width: 1px;
-            border-color: #dc2626;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-bg;
+            border-width: 2px;
+            border-color: Theme.danger;
 
             VerticalLayout {
                 padding: 20px;
-                spacing: 12px;
-                Text { text: "Hard Power-Off Warning"; color: #fca5a5; font-size: 16px; font-weight: 700; }
+                spacing: Theme.space-md;
+                Text { text: "Hard Power-Off Warning"; color: Theme.danger; font-size: 16px; font-weight: 700; }
                 Text {
                     text: "Closing \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately powers off the Space without a graceful shutdown. Unsaved files inside it may be lost.";
-                    color: #e2e8f0;
+                    color: Theme.text-secondary;
                     font-size: 13px;
                     wrap: word-wrap;
                 }
                 if root.confirm-stop-vm-disposable : Text {
                     text: "Disposable mode is enabled — this Space's writable CoW disk will be permanently reset on stop.";
-                    color: #fdba74;
-                    font-size: 12px;
+                    color: Theme.danger;
+                    font-size: Theme.font-base;
                     wrap: word-wrap;
                 }
                 HorizontalLayout {
@@ -1294,18 +1338,18 @@ export component MainWindow inherits Window {
             width: 490px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            border-radius: 12px;
-            background: #111827;
-            border-width: 1px;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-bg;
+            border-width: 2px;
             border-color: #f59e0b;
 
             VerticalLayout {
                 padding: 20px;
-                spacing: 12px;
-                Text { text: "Restore Snapshot Warning"; color: #fcd34d; font-size: 16px; font-weight: 700; }
+                spacing: Theme.space-md;
+                Text { text: "Restore Snapshot Warning"; color: Theme.text-primary; font-size: 16px; font-weight: 700; }
                 Text {
                     text: "Restoring " + root.confirm-restore-snap-label + " on \"" + root.confirm-restore-vm-name + "\" swaps its current disk atomically. Any disk changes made since this snapshot will be permanently lost.";
-                    color: #e2e8f0;
+                    color: Theme.text-secondary;
                     font-size: 13px;
                     wrap: word-wrap;
                 }

@@ -91,3 +91,10 @@ Per [`ARCHITECTURE.md`](../ARCHITECTURE.md) Contract v2 (A3):
 - Both `desktop-shell` and `vm-control-ui` run as an unprivileged GUI user in the `hyperos` group (plus `seat` for `seatd`).
 - `/var/lib/hyperos` is `root:hyperos 0710` (traverse-only) and `/var/lib/hyperos/captures/` is `root:hyperos 0750`, while `base-images/` and `instances/` remain `root:root 0700`.
 - When connection fails or is rejected, the Top Context Rail displays a visible red `VMM Offline` badge and an actionable banner distinguishing filesystem permission denial (`hyperos` group missing), immediate `SO_PEERCRED` peer close, `vmm-daemon` not running, and RPC timeouts (without blindly retrying mutations).
+
+### Data-Only JSON Themes (`themes/`)
+
+`desktop-shell` loads a pure JSON token file at startup (`--theme <PATH>` CLI flag or `HYPEROS_THEME` env var, falling back cleanly to the built-in Obsidian dark theme):
+- Shipped themes: [`themes/obsidian.json`](themes/obsidian.json) (`layout_preset: "compact"`, dark slate/cyan) and [`themes/daylight.json`](themes/daylight.json) (`layout_preset: "comfortable"`, high-contrast light canvas).
+- Strict validation (`#[serde(deny_unknown_fields)]`, `schema_version == 1`, 64 KiB file size cap, exact `#RRGGBB` colors, bounded integer font/radii/spacing sizes, disallowed path/control characters in font names): invalid or missing theme files fall back to built-in Obsidian with a warning banner/stderr message and zero code execution.
+- Security boundary: VM origin accent colors (`Host`, `Browser`, `Bank`, `Dev`, `Unknown` 2px borders and origin badges) are fixed in Rust [`origin.rs`](src/origin.rs) and cannot be overridden by theme JSON.

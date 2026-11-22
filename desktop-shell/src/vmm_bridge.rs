@@ -600,7 +600,9 @@ impl MockShellVmmBridge {
 
 impl ShellVmmBridge for MockShellVmmBridge {
     fn list_vms(&mut self) -> Result<Vec<VmSummary>, String> {
-        Ok(self.vms.values().cloned().collect())
+        let mut list: Vec<VmSummary> = self.vms.values().cloned().collect();
+        list.sort_by(|a, b| a.vm_id.cmp(&b.vm_id));
+        Ok(list)
     }
 
     fn create_vm(

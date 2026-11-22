@@ -8,4 +8,5 @@ pub mod kms;
 pub mod layout;
 pub mod origin;
 pub mod sys_status;
+pub mod theme;
 pub mod vmm_bridge;
