@@ -5,17 +5,20 @@ Privileged Rust control-plane daemon supervising `crosvm` child processes for Hy
 ## Key Capabilities
 
 - **JSON-RPC 2.0 Unix Socket Server (`src/server.rs`, `src/rpc.rs`):**
-  - Binds `/run/hyperos/vmm.sock` (`AF_UNIX`/`SOCK_STREAM`, mode `0600`, parent `/run/hyperos` `0700`, `umask 077`, `SO_PEERCRED` UID 0 only in production).
+  - Binds `/run/hyperos/vmm.sock` (`AF_UNIX`/`SOCK_STREAM`, `umask 077`). In production `SO_PEERCRED` admits UID 0 and members of the `hyperos` group (socket `root:hyperos 0660`, parent `0750`; `src/auth.rs`). If the group does not exist the socket stays root-only (`0600`, parent `0700`).
   - Serializes daemon startup via `flock(LOCK_EX | LOCK_NB)` and only unlinks stale sockets after proving no live daemon owns them.
   - Serves concurrent clients asynchronously via Tokio with strict 65,536-byte LF-delimited frames, unique outstanding request ID tracking, and verbatim `ARCHITECTURE.md` error codes (`-32700` to `-32005`).
 - **Zero-Overhead Btrfs CoW Storage & Persistence (`src/storage.rs`):**
   - Validates `manifest.json` SHA-256 checksums and rejects symlink traversal outside `/var/lib/hyperos/base-images/`.
   - Clones base disks with `cp --reflink=always` into per-VM Btrfs subvolumes (`instances/<vm_id>/current/disk.raw`), rejecting non-reflink filesystems in production without full-copy fallback.
-  - Persists `metadata.json` atomically (`write` -> `fsync` -> `rename` -> `fsync(dir)`), creates cold read-only Btrfs subvolume snapshots (`snapshots/<snapshot_id>/` + `snapshot-metadata/<snapshot_id>.json`), and recovers interrupted staging on startup. The storage layer can purge a VM's CoW overlay on stop for an internal `ephemeral` flag, but no RPC sets it yet, so disposable VMs are not reachable through the API.
+  - Persists `metadata.json` atomically (`write` -> `fsync` -> `rename` -> `fsync(dir)`), creates cold read-only Btrfs subvolume snapshots (`snapshots/<snapshot_id>/` + `snapshot-metadata/<snapshot_id>.json`), and recovers interrupted staging, restores and deletes on startup.
+  - `list_snapshots`, `restore_snapshot` (atomic `renameat2(RENAME_EXCHANGE)` swap of `current/`) and `delete_snapshot`.
+  - Disposable VMs (`create_vm` `"disposable": true`) discard their writable disk on every stop or crash and re-clone it from the base at the next start.
+- **Packet capture (`src/capture.rs`):** `start_capture` / `stop_capture` / `list_captures` / `delete_capture` record a running VM's TAP with the daemon's own `AF_PACKET` socket into classic pcap files under `/var/lib/hyperos/captures/<vm_id>/` (`root:hyperos 0640`, 256 MiB cap). Captures stop when the VM stops or crashes.
 - **`crosvm` Supervision, Ballooning & Network Sandboxing (`src/hypervisor.rs`, `src/network.rs`, `src/manager.rs`):**
   - Spawns `crosvm run` with `virtio-blk`, `virtio-balloon`, `virtio-vsock`, `virtio-gpu`, jail/seccomp, and optional `virtio-net` TAP.
   - Wires `pause_vm` (`crosvm suspend`), resume (`crosvm resume`), `set_balloon_ram` (`crosvm balloon <bytes>`), `stop_vm` (`crosvm stop` + signal/reap), and runtime snapshot helper (`crosvm snapshot take`).
-  - Enforces `MemTotal - 768 MiB` RAM admission control, per-VM + global locks, startup state reconciliation, `isolated`/`nat`/`host-only` network sandboxing via `ip` and `nft` (zero shell interpolation), and graceful `SIGTERM` child shutdown.
+  - Enforces `MemTotal - 768 MiB` RAM admission control, per-VM + global locks, startup state reconciliation, `isolated`/`nat` (public internet only)/`host-only` network sandboxing via `ip` and `nft` (zero shell interpolation), and graceful `SIGTERM` child shutdown.
 
 ## Build, Test, and Dry-Run
 

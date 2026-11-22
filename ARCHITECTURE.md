@@ -207,6 +207,12 @@ service formats disks on boot. A failed data mount blocks daemon startup.
 
 ## Contract v2 additions (approved 2026-11-22)
 
+**Implementation status:** A1 (NAT), A3 (socket authorization) and A4 (disposable
+VMs, snapshot and capture methods, storage layout) are implemented in
+`vmm-daemon`. A2 (unprivileged crosvm) is not yet. Where a v1 section above
+disagrees with an implemented item here (for example socket modes, the VM
+object's key count, or `/var/lib/hyperos` permissions), this section wins.
+
 This section is the A0 step of [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md).
 Everything above describes v1 as implemented. Once approved, implementers code
 against this section; when a step lands, its text is folded into the v1 sections
@@ -310,6 +316,8 @@ current pcap file size.
   GUI user can open known capture paths and nothing else. The path is derived
   from IDs, never taken from a request. Captures contain raw guest traffic,
   including anything malware sends; treat them as untrusted input.
+* `delete_capture` on the capture that is still running returns -32002; stop it
+  first.
 * Capture metadata persists under `captures/<vm_id>/<capture_id>.json`. Only
   `delete_capture` removes a capture. At daemon start, any capture left in
   `running` is marked `stopped`.

@@ -3,10 +3,12 @@
 //! All system invocations use `std::process::Command` with explicit argument arrays;
 //! request values are never interpolated into a shell.
 
+use crate::capture::{AfPacketSource, PacketSource};
 use crate::rpc::{error_code, NetworkMode, RpcError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Active host network allocation attached to a running/paused VM.
@@ -26,6 +28,8 @@ pub struct NetworkAllocation {
 pub trait NetworkController: Send + Sync {
     fn setup(&self, vm_id: &str, mode: NetworkMode) -> Result<Option<NetworkAllocation>, RpcError>;
     fn teardown(&self, alloc: &NetworkAllocation);
+    /// Open a frame source seeing both directions of the VM's TAP.
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError>;
 }
 
 fn short_id(vm_id: &str) -> String {
@@ -323,6 +327,17 @@ impl NetworkController for LinuxNetworkController {
         let mut guard = self.used_slots.lock().unwrap();
         guard.remove(&alloc.subnet_slot);
     }
+
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError> {
+        AfPacketSource::open(&alloc.tap_name)
+            .map(|s| Box::new(s) as Box<dyn PacketSource>)
+            .map_err(|_| {
+                RpcError::new(
+                    error_code::IO_FAILURE,
+                    "failed to open packet capture socket",
+                )
+            })
+    }
 }
 
 /// In-memory mock network controller for `--dry-run` and CI tests (requires no `CAP_NET_ADMIN`).
@@ -331,9 +346,61 @@ pub struct MockNetworkController {
     used_slots: Mutex<HashSet<u8>>,
     active: Mutex<Vec<NetworkAllocation>>,
     torn_down: Mutex<Vec<NetworkAllocation>>,
+    /// Frames queued per TAP name, consumed by mock capture sources.
+    frames: Mutex<HashMap<String, FrameQueue>>,
+}
+
+/// Frames waiting to be read by one mock capture source.
+type FrameQueue = Arc<Mutex<VecDeque<Vec<u8>>>>;
+
+/// Mock capture source draining frames queued with `MockNetworkController::inject_frame`.
+struct MockPacketSource(FrameQueue);
+
+impl PacketSource for MockPacketSource {
+    fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<Option<(usize, usize)>> {
+        let next = self.0.lock().unwrap().pop_front();
+        match next {
+            Some(frame) => {
+                let n = frame.len().min(buf.len());
+                buf[..n].copy_from_slice(&frame[..n]);
+                Ok(Some((n, frame.len())))
+            }
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl MockNetworkController {
+    /// Queue a frame as if it crossed the TAP of `vm_id`'s active allocation.
+    /// Returns `false` if the VM has no NIC.
+    pub fn inject_frame(&self, vm_id: &str, frame: Vec<u8>) -> bool {
+        let Some(tap) = self
+            .active
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.vm_id == vm_id)
+            .map(|a| a.tap_name.clone())
+        else {
+            return false;
+        };
+        self.frame_queue(&tap).lock().unwrap().push_back(frame);
+        true
+    }
+
+    fn frame_queue(&self, tap: &str) -> FrameQueue {
+        Arc::clone(
+            self.frames
+                .lock()
+                .unwrap()
+                .entry(tap.to_string())
+                .or_default(),
+        )
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -367,7 +434,14 @@ impl NetworkController for MockNetworkController {
             .lock()
             .unwrap()
             .retain(|a| a.tap_name != alloc.tap_name);
+        self.frames.lock().unwrap().remove(&alloc.tap_name);
         self.torn_down.lock().unwrap().push(alloc.clone());
+    }
+
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError> {
+        Ok(Box::new(MockPacketSource(
+            self.frame_queue(&alloc.tap_name),
+        )))
     }
 }
 

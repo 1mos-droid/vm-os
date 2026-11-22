@@ -1,12 +1,15 @@
 //! Core `VmManager` coordinating storage, network sandboxing, `crosvm` supervision,
-//! RAM admission control, startup reconciliation, ephemeral cleanup, and SIGTERM shutdown.
+//! RAM admission control, startup reconciliation, disposable-VM cleanup, snapshot restore,
+//! packet capture, and SIGTERM shutdown.
 
+use crate::capture::{CaptureHandle, CAPTURE_LIMIT_BYTES};
 use crate::hypervisor::{
     ChildExitReason, CrosvmRunSpec, HypervisorController, DEFAULT_GUEST_KERNEL,
 };
 use crate::network::{NetworkAllocation, NetworkController};
 use crate::rpc::{
-    balloon_bytes, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name, CreateVmParams,
+    balloon_bytes, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name, Capture,
+    CaptureState, CreateVmParams, EmptyParams, ListCapturesResult, ListSnapshotsResult,
     ListVmsResult, NetworkMode, RpcError, Snapshot, Vm, VmState, HOST_RAM_RESERVE_MIB,
     MAX_VCPU_COUNT, MAX_VM_RAM_MIB, MIN_VCPU_COUNT, MIN_VM_RAM_MIB,
 };
@@ -79,6 +82,8 @@ pub struct VmManager {
     vm_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Authoritative in-memory VM registry (always sorted by canonical lowercase `vm_id`).
     vms: RwLock<BTreeMap<String, ManagedVm>>,
+    /// Latest capture per VM. A handle may have finished on its own (`limit_reached`).
+    captures: Mutex<HashMap<String, CaptureHandle>>,
 }
 
 impl VmManager {
@@ -93,12 +98,14 @@ impl VmManager {
         dry_run: bool,
     ) -> Result<Arc<Self>, String> {
         let runtime_root = runtime_root.as_ref().to_path_buf();
+        // The runtime root's own mode belongs to the socket server (0700, or 0750 for
+        // the control group); per-VM runtime state stays root-only.
         fs::create_dir_all(runtime_root.join("vms"))
             .map_err(|e| format!("failed to create runtime vms dir: {e}"))?;
-        let _ = fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700));
         let _ = fs::set_permissions(runtime_root.join("vms"), fs::Permissions::from_mode(0o700));
 
         let reconciled = Self::reconcile_on_startup(&storage, &runtime_root, dry_run)?;
+        storage.reconcile_captures()?;
 
         let mgr = Arc::new(Self {
             storage,
@@ -110,6 +117,7 @@ impl VmManager {
             storage_lock: Mutex::new(()),
             vm_locks: Mutex::new(HashMap::new()),
             vms: RwLock::new(reconciled),
+            captures: Mutex::new(HashMap::new()),
         });
 
         Ok(mgr)
@@ -191,7 +199,7 @@ impl VmManager {
                 if rt_dir.exists() {
                     let _ = fs::remove_dir_all(&rt_dir);
                 }
-                if rec.policy.ephemeral {
+                if rec.vm.disposable {
                     let _ = storage.delete_vm_overlay(&rec.vm.vm_id);
                 }
                 storage
@@ -240,29 +248,6 @@ impl VmManager {
         let used: std::collections::HashSet<u32> =
             map.values().map(|m| m.policy.vsock_cid).collect();
         (3u32..=65_535).find(|cid| !used.contains(cid)).unwrap_or(3)
-    }
-
-    /// Update internal ephemeral/balloon policy for a VM (persisted in `daemon-policy.json`).
-    pub async fn set_vm_policy(
-        &self,
-        vm_id: &str,
-        ephemeral: bool,
-        balloon_min_ram_mib: u32,
-    ) -> Result<(), RpcError> {
-        if !is_valid_uuid(vm_id) {
-            return Err(RpcError::new(error_code::INVALID_PARAMS, "invalid vm_id"));
-        }
-        let lock = self.vm_lock(vm_id).await;
-        let _guard = lock.lock().await;
-        let mut map = self.vms.write().await;
-        let entry = map
-            .get_mut(vm_id)
-            .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
-        entry.policy.ephemeral = ephemeral;
-        entry.policy.balloon_min_ram_mib =
-            balloon_min_ram_mib.clamp(MIN_VM_RAM_MIB, entry.vm.ram_mib);
-        self.storage.save_vm_policy(vm_id, &entry.policy)?;
-        Ok(())
     }
 
     pub async fn list_vms(&self) -> Result<ListVmsResult, RpcError> {
@@ -330,9 +315,9 @@ impl VmManager {
             balloon_target_mib: params.ram_mib,
             network_mode: params.network_mode,
             state: VmState::Stopped,
+            disposable: params.disposable,
         };
         let policy = DaemonVmPolicy {
-            ephemeral: false,
             balloon_min_ram_mib: MIN_VM_RAM_MIB.min(params.ram_mib),
             balloon_max_ram_mib: params.ram_mib,
             vsock_cid,
@@ -399,7 +384,7 @@ impl VmManager {
                     ));
                 }
 
-                // Ensure CoW disk exists (re-clones fresh overlay if ephemeral VM was purged).
+                // Ensure CoW disk exists (re-clones a fresh overlay for a disposable VM).
                 let disk_path = self.storage.ensure_vm_overlay(&current_vm)?;
 
                 let rt_dir = self.runtime_vm_dir(vm_id);
@@ -506,6 +491,7 @@ impl VmManager {
     async fn handle_unexpected_exit(&self, vm_id: &str) {
         let lock = self.vm_lock(vm_id).await;
         let _guard = lock.lock().await;
+        self.end_capture(vm_id).await;
 
         let mut map = self.vms.write().await;
         let Some(entry) = map.get_mut(vm_id) else {
@@ -521,7 +507,7 @@ impl VmManager {
         if let Some(rt_dir) = entry.runtime_dir.take() {
             let _ = fs::remove_dir_all(&rt_dir);
         }
-        if entry.policy.ephemeral {
+        if entry.vm.disposable {
             let _ = self.storage.delete_vm_overlay(vm_id);
         }
         entry.vm.state = VmState::Failed;
@@ -590,6 +576,7 @@ impl VmManager {
             let control_sock = self.control_socket_path(vm_id);
             self.hypervisor.stop_vm(vm_id, &control_sock).await?;
         }
+        self.end_capture(vm_id).await;
 
         let mut map = self.vms.write().await;
         let entry = map
@@ -608,8 +595,8 @@ impl VmManager {
             }
         }
 
-        // Automatically purge CoW overlay on shutdown if VM is marked ephemeral.
-        if entry.policy.ephemeral {
+        // A disposable VM's writable disk is discarded on every stop.
+        if entry.vm.disposable {
             self.storage.delete_vm_overlay(vm_id)?;
         }
 
@@ -640,6 +627,12 @@ impl VmManager {
             return Err(RpcError::new(
                 error_code::INVALID_STATE,
                 "snapshot_vm is allowed only while the VM is stopped",
+            ));
+        }
+        if current_vm.disposable {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "disposable VMs cannot be snapshotted",
             ));
         }
 
@@ -720,6 +713,207 @@ impl VmManager {
         self.storage.save_vm_metadata(&next_vm)?;
         entry.vm = next_vm;
         Ok(entry.vm.clone())
+    }
+
+    async fn existing_vm(&self, vm_id: &str) -> Result<Vm, RpcError> {
+        if !is_valid_uuid(vm_id) {
+            return Err(RpcError::new(error_code::INVALID_PARAMS, "invalid vm_id"));
+        }
+        let map = self.vms.read().await;
+        map.get(vm_id)
+            .map(|e| e.vm.clone())
+            .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))
+    }
+
+    fn require_uuid(id: &str, what: &str) -> Result<(), RpcError> {
+        if is_valid_uuid(id) {
+            Ok(())
+        } else {
+            Err(RpcError::new(
+                error_code::INVALID_PARAMS,
+                format!("invalid {what}"),
+            ))
+        }
+    }
+
+    pub async fn list_snapshots(&self, vm_id: &str) -> Result<ListSnapshotsResult, RpcError> {
+        self.existing_vm(vm_id).await?;
+        let snapshots = self.storage.list_snapshots(vm_id)?;
+        Ok(ListSnapshotsResult { snapshots })
+    }
+
+    pub async fn restore_snapshot(&self, vm_id: &str, snapshot_id: &str) -> Result<Vm, RpcError> {
+        Self::require_uuid(snapshot_id, "snapshot_id")?;
+        self.existing_vm(vm_id).await?;
+        let lock = self.vm_lock(vm_id).await;
+        let _guard = lock.lock().await;
+        let _storage_guard = self.storage_lock.lock().await;
+
+        let vm = self.existing_vm(vm_id).await?;
+        if vm.state != VmState::Stopped {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "restore_snapshot requires a stopped VM",
+            ));
+        }
+        if vm.disposable {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "disposable VMs cannot be restored from a snapshot",
+            ));
+        }
+        self.storage.restore_snapshot(vm_id, snapshot_id)?;
+        Ok(vm)
+    }
+
+    pub async fn delete_snapshot(
+        &self,
+        vm_id: &str,
+        snapshot_id: &str,
+    ) -> Result<EmptyParams, RpcError> {
+        Self::require_uuid(snapshot_id, "snapshot_id")?;
+        self.existing_vm(vm_id).await?;
+        let lock = self.vm_lock(vm_id).await;
+        let _guard = lock.lock().await;
+        let _storage_guard = self.storage_lock.lock().await;
+        self.storage.delete_snapshot(vm_id, snapshot_id)?;
+        Ok(EmptyParams {})
+    }
+
+    pub async fn start_capture(&self, vm_id: &str) -> Result<Capture, RpcError> {
+        self.existing_vm(vm_id).await?;
+        let lock = self.vm_lock(vm_id).await;
+        let _guard = lock.lock().await;
+
+        let (vm, alloc) = {
+            let map = self.vms.read().await;
+            let entry = map
+                .get(vm_id)
+                .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "VM not found"))?;
+            (entry.vm.clone(), entry.network.clone())
+        };
+        if vm.network_mode == NetworkMode::Isolated {
+            return Err(RpcError::new(
+                error_code::UNAVAILABLE_CAPABILITY,
+                "isolated VMs have no network interface to capture",
+            ));
+        }
+        if vm.state != VmState::Running {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "start_capture requires a running VM",
+            ));
+        }
+        let alloc = alloc.ok_or_else(|| {
+            RpcError::new(
+                error_code::UNAVAILABLE_CAPABILITY,
+                "VM network interface is not available",
+            )
+        })?;
+
+        let mut captures = self.captures.lock().await;
+        if captures.get(vm_id).is_some_and(|h| h.is_running()) {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "a capture is already running for this VM",
+            ));
+        }
+
+        let source = self.network.open_capture(&alloc)?;
+        let capture = Capture {
+            capture_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            vm_id: vm_id.to_string(),
+            started_at: utc_rfc3339_seconds(),
+            state: CaptureState::Running,
+            bytes: 0,
+        };
+        let file = self
+            .storage
+            .create_capture_file(vm_id, &capture.capture_id)?;
+        if let Err(err) = self.storage.save_capture(&capture) {
+            let _ = fs::remove_file(self.storage.capture_pcap_path(vm_id, &capture.capture_id));
+            return Err(err);
+        }
+
+        let storage = self.storage.clone();
+        let handle = CaptureHandle::spawn(
+            source,
+            file,
+            capture,
+            CAPTURE_LIMIT_BYTES,
+            Box::new(move |done| {
+                if let Err(err) = storage.save_capture(done) {
+                    eprintln!("vmm-daemon: failed to persist capture: {err}");
+                }
+            }),
+        );
+        let started = handle.snapshot();
+        // Replacing a finished (`limit_reached`) handle is fine: it already persisted.
+        captures.insert(vm_id.to_string(), handle);
+        Ok(started)
+    }
+
+    pub async fn stop_capture(&self, vm_id: &str) -> Result<Capture, RpcError> {
+        self.existing_vm(vm_id).await?;
+        let lock = self.vm_lock(vm_id).await;
+        let _guard = lock.lock().await;
+        if let Some(done) = self.end_capture(vm_id).await {
+            return Ok(done);
+        }
+        // Idempotent: report the most recent capture if none is running.
+        self.storage
+            .list_captures(vm_id)?
+            .pop()
+            .ok_or_else(|| RpcError::new(error_code::NOT_FOUND, "no capture exists for this VM"))
+    }
+
+    pub async fn list_captures(&self, vm_id: &str) -> Result<ListCapturesResult, RpcError> {
+        self.existing_vm(vm_id).await?;
+        let mut captures = self.storage.list_captures(vm_id)?;
+        if let Some(handle) = self.captures.lock().await.get(vm_id) {
+            let live = handle.snapshot();
+            if let Some(c) = captures
+                .iter_mut()
+                .find(|c| c.capture_id == live.capture_id)
+            {
+                *c = live;
+            }
+        }
+        Ok(ListCapturesResult { captures })
+    }
+
+    pub async fn delete_capture(
+        &self,
+        vm_id: &str,
+        capture_id: &str,
+    ) -> Result<EmptyParams, RpcError> {
+        Self::require_uuid(capture_id, "capture_id")?;
+        self.existing_vm(vm_id).await?;
+        let lock = self.vm_lock(vm_id).await;
+        let _guard = lock.lock().await;
+        let mut captures = self.captures.lock().await;
+        if let Some(handle) = captures.get(vm_id) {
+            if handle.snapshot().capture_id == capture_id {
+                if handle.is_running() {
+                    return Err(RpcError::new(
+                        error_code::INVALID_STATE,
+                        "stop the capture before deleting it",
+                    ));
+                }
+                captures.remove(vm_id);
+            }
+        }
+        self.storage.delete_capture(vm_id, capture_id)?;
+        Ok(EmptyParams {})
+    }
+
+    /// Stop a VM's capture, if any, waiting for its final flush. Called with the VM
+    /// lock held, before the TAP is torn down.
+    async fn end_capture(&self, vm_id: &str) -> Option<Capture> {
+        let handle = self.captures.lock().await.remove(vm_id)?;
+        tokio::task::spawn_blocking(move || handle.stop())
+            .await
+            .ok()
     }
 
     /// Gracefully stop all active VMs and persist metadata before daemon exit (`SIGTERM`).
