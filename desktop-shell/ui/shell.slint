@@ -1,12 +1,32 @@
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ScrollView } from "std-widgets.slint";
 
 export struct SpacePill {
     vm-id: string,
     name: string,
     ram-label: string,
+    network-badge: string,
+    disposable: bool,
+    capturing: bool,
     accent: color,
     active: bool,
     running: bool,
+}
+
+export struct ShellSnapshotItem {
+    snapshot-id: string,
+    short-id: string,
+    vm-id: string,
+    created-at: string,
+    can-restore: bool,
+}
+
+export struct ShellCaptureItem {
+    capture-id: string,
+    short-id: string,
+    vm-id: string,
+    started-at: string,
+    state: string,
+    bytes-label: string,
 }
 
 export struct ShellWindowCard {
@@ -57,10 +77,33 @@ export component HyperShellWindow inherits Window {
     // Compositor window surfaces (2px colored origin border + subtle origin badge)
     in property <[ShellWindowCard]> windows: [];
 
-    // Super-key Action Deck overlay
+    // Super-key Action Deck overlay & Active Space Research Controls
     in-out property <bool> action-deck-visible: false;
     in-out property <string> deck-query: "";
+    in-out property <bool> deck-launch-disposable: false;
     in property <[DeckResultItem]> deck-results: [];
+    in property <string> selected-vm-id: "";
+    in property <string> selected-vm-name: "";
+    in property <string> selected-vm-state: "";
+    in property <string> selected-vm-network-badge: "";
+    in property <bool> selected-vm-disposable: false;
+    in property <bool> selected-capture-supported: false;
+    in property <bool> selected-capture-active: false;
+    in property <string> selected-capture-status: "Capture Idle";
+    in property <[ShellSnapshotItem]> selected-snapshots: [];
+    in property <[ShellCaptureItem]> selected-captures: [];
+
+    // Mandatory confirmation modals (hard power-off & snapshot restore overwrite)
+    in-out property <bool> confirm-stop-visible: false;
+    in-out property <string> confirm-stop-vm-id: "";
+    in-out property <string> confirm-stop-vm-name: "";
+    in-out property <bool> confirm-stop-vm-disposable: false;
+
+    in-out property <bool> confirm-restore-visible: false;
+    in-out property <string> confirm-restore-vm-id: "";
+    in-out property <string> confirm-restore-vm-name: "";
+    in-out property <string> confirm-restore-snap-id: "";
+    in-out property <string> confirm-restore-short-id: "";
 
     // Callbacks wired in Rust (Smithay + VMM JSON-RPC bridge)
     callback toggle-action-deck();
@@ -70,6 +113,14 @@ export component HyperShellWindow inherits Window {
     callback reclaim-ram-clicked();
     callback launch-preset(string);
     callback activate-deck-entry(string);
+    callback start-vm-action(string);
+    callback confirm-stop-vm-action(string);
+    callback snapshot-vm-action(string);
+    callback confirm-restore-snapshot-action(string, string);
+    callback delete-snapshot-action(string, string);
+    callback start-capture-action(string);
+    callback stop-capture-action(string);
+    callback delete-capture-action(string, string);
     callback focus-window(int);
     callback snap-window-action(int, string);
     callback toggle-wifi();
@@ -313,6 +364,46 @@ export component HyperShellWindow inherits Window {
                                 font-size: 12px;
                                 font-weight: 600;
                                 vertical-alignment: center;
+                            }
+                            Text {
+                                text: pill.network-badge;
+                                color: pill.network-badge == "NAT · Internet Only" ? #67e8f9 : #94a3b8;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            if pill.disposable : Rectangle {
+                                height: 18px;
+                                y: 6px;
+                                border-radius: 9px;
+                                background: #7c2d12;
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    Text {
+                                        text: "DISP";
+                                        color: #ffedd5;
+                                        font-size: 9px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            if pill.capturing : Rectangle {
+                                height: 18px;
+                                y: 6px;
+                                border-radius: 9px;
+                                background: #7f1d1d;
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    Text {
+                                        text: "● REC";
+                                        color: #fecaca;
+                                        font-size: 9px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                }
                             }
                             Text {
                                 text: pill.ram-label;
@@ -574,10 +665,10 @@ export component HyperShellWindow inherits Window {
             }
 
             Rectangle {
-                width: 720px;
-                height: 520px;
+                width: 820px;
+                height: 640px;
                 x: (parent.width - self.width) / 2;
-                y: 36px;
+                y: 24px;
                 border-radius: 16px;
                 background: #0f172a;
                 border-width: 1px;
@@ -587,8 +678,8 @@ export component HyperShellWindow inherits Window {
                 TouchArea {}
 
                 VerticalLayout {
-                    padding: 20px;
-                    spacing: 14px;
+                    padding: 18px;
+                    spacing: 10px;
 
                     // Header + Instant Search Bar
                     HorizontalLayout {
@@ -613,12 +704,20 @@ export component HyperShellWindow inherits Window {
                         edited(q) => { root.deck-query-changed(q); }
                     }
 
-                    // One-Click Instant Environment Launchers
-                    Text {
-                        text: "INSTANT ENVIRONMENTS";
-                        color: #94a3b8;
-                        font-size: 11px;
-                        font-weight: 700;
+                    // One-Click Instant Environment Launchers + Disposable Toggle
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "INSTANT ENVIRONMENTS";
+                            color: #94a3b8;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        CheckBox {
+                            text: "Disposable (reset disk on stop)";
+                            checked <=> root.deck-launch-disposable;
+                        }
                     }
 
                     HorizontalLayout {
@@ -627,7 +726,7 @@ export component HyperShellWindow inherits Window {
                         // Disposable Browser
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
+                            height: 76px;
                             border-radius: 10px;
                             background: #111827;
                             border-width: 1px;
@@ -638,7 +737,7 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Disposable Browser";
@@ -647,7 +746,7 @@ export component HyperShellWindow inherits Window {
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Safe Web · Self-destructs on close";
+                                    text: "NAT · Internet Only · Disposable";
                                     color: #94a3b8;
                                     font-size: 11px;
                                     wrap: word-wrap;
@@ -658,7 +757,7 @@ export component HyperShellWindow inherits Window {
                         // Work Pod
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
+                            height: 76px;
                             border-radius: 10px;
                             background: #111827;
                             border-width: 1px;
@@ -669,7 +768,7 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Work Pod";
@@ -678,7 +777,7 @@ export component HyperShellWindow inherits Window {
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Safe Web · Daily apps & checkpoints";
+                                    text: "NAT · Internet Only · Daily apps";
                                     color: #94a3b8;
                                     font-size: 11px;
                                     wrap: word-wrap;
@@ -689,7 +788,7 @@ export component HyperShellWindow inherits Window {
                         // Offline Vault
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
+                            height: 76px;
                             border-radius: 10px;
                             background: #111827;
                             border-width: 1px;
@@ -700,7 +799,7 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Offline Vault";
@@ -709,10 +808,170 @@ export component HyperShellWindow inherits Window {
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Zero Network · Air-gapped private files";
+                                    text: "Isolated · Offline · Air-gapped";
                                     color: #94a3b8;
                                     font-size: 11px;
                                     wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Active Space Controls (Snapshots, Packet Capture, Disposable & Network Badges)
+                    if root.selected-vm-id != "" : Rectangle {
+                        border-radius: 10px;
+                        background: #111827;
+                        border-width: 1px;
+                        border-color: #243247;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Space: " + root.selected-vm-name;
+                                        color: #f8fafc;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: #1e293b;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.selected-vm-state;
+                                                color: #e2e8f0;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: root.selected-vm-network-badge == "NAT · Internet Only" ? #083344 : #1e293b;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.selected-vm-network-badge;
+                                                color: root.selected-vm-network-badge == "NAT · Internet Only" ? #67e8f9 : #cbd5e1;
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if root.selected-vm-disposable : Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: #7c2d12;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: "DISPOSABLE";
+                                                color: #ffedd5;
+                                                font-size: 10px;
+                                                font-weight: 800;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: root.selected-capture-status;
+                                    color: root.selected-capture-active ? #6ee7b7 : #94a3b8;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                if root.selected-vm-state != "running" : Button {
+                                    text: "Open Space";
+                                    clicked => { root.start-vm-action(root.selected-vm-id); }
+                                }
+                                if root.selected-vm-state == "running" || root.selected-vm-state == "paused" : Button {
+                                    text: "Force Close";
+                                    clicked => {
+                                        root.confirm-stop-vm-id = root.selected-vm-id;
+                                        root.confirm-stop-vm-name = root.selected-vm-name;
+                                        root.confirm-stop-vm-disposable = root.selected-vm-disposable;
+                                        root.confirm-stop-visible = true;
+                                    }
+                                }
+                                if !root.selected-capture-active : Button {
+                                    text: "● Start Capture";
+                                    enabled: root.selected-vm-state == "running" && root.selected-capture-supported;
+                                    clicked => { root.start-capture-action(root.selected-vm-id); }
+                                }
+                                if root.selected-capture-active : Button {
+                                    text: "■ Stop Capture";
+                                    clicked => { root.stop-capture-action(root.selected-vm-id); }
+                                }
+                                Button {
+                                    text: "Save Snapshot";
+                                    enabled: root.selected-vm-state == "stopped" && !root.selected-vm-disposable;
+                                    clicked => { root.snapshot-vm-action(root.selected-vm-id); }
+                                }
+                            }
+
+                            for snap in root.selected-snapshots : HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 6px;
+                                Text {
+                                    text: "Snapshot " + snap.short-id + " · " + snap.created-at;
+                                    color: #cbd5e1;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Button {
+                                        text: "↺ Restore";
+                                        enabled: snap.can-restore;
+                                        clicked => {
+                                            root.confirm-restore-vm-id = snap.vm-id;
+                                            root.confirm-restore-vm-name = root.selected-vm-name;
+                                            root.confirm-restore-snap-id = snap.snapshot-id;
+                                            root.confirm-restore-short-id = snap.short-id;
+                                            root.confirm-restore-visible = true;
+                                        }
+                                    }
+                                    Button {
+                                        text: "Delete";
+                                        clicked => { root.delete-snapshot-action(snap.vm-id, snap.snapshot-id); }
+                                    }
+                                }
+                            }
+
+                            for cap in root.selected-captures : HorizontalLayout {
+                                alignment: space-between;
+                                spacing: 6px;
+                                Text {
+                                    text: "Capture " + cap.short-id + " [" + cap.state + "] · " + cap.bytes-label + " · " + cap.started-at;
+                                    color: #cbd5e1;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Delete";
+                                    enabled: cap.state != "running";
+                                    clicked => { root.delete-capture-action(cap.vm-id, cap.capture-id); }
                                 }
                             }
                         }
@@ -822,6 +1081,104 @@ export component HyperShellWindow inherits Window {
                                     primary: root.global-offline-shield;
                                     clicked => { root.toggle-offline-shield(); }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= HARD POWER-OFF WARNING MODAL =================
+        if root.confirm-stop-visible : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #020617cc;
+
+            TouchArea {}
+
+            Rectangle {
+                width: 480px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 12px;
+                background: #111827;
+                border-width: 1px;
+                border-color: #dc2626;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    Text { text: "Hard Power-Off Warning"; color: #fca5a5; font-size: 16px; font-weight: 700; }
+                    Text {
+                        text: "Force closing \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately powers off the Space without a graceful shutdown. Unsaved guest data may be lost.";
+                        color: #e2e8f0;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    if root.confirm-stop-vm-disposable : Text {
+                        text: "This Space is DISPOSABLE — its writable CoW disk will be permanently discarded on stop.";
+                        color: #fdba74;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        Button { text: "Cancel"; clicked => { root.confirm-stop-visible = false; } }
+                        Button {
+                            text: "Force Close Space";
+                            primary: true;
+                            clicked => {
+                                root.confirm-stop-visible = false;
+                                root.confirm-stop-vm-action(root.confirm-stop-vm-id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= SNAPSHOT RESTORE DATA-LOSS MODAL =================
+        if root.confirm-restore-visible : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #020617cc;
+
+            TouchArea {}
+
+            Rectangle {
+                width: 480px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 12px;
+                background: #111827;
+                border-width: 1px;
+                border-color: #f59e0b;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    Text { text: "Restore Snapshot Warning"; color: #fcd34d; font-size: 16px; font-weight: 700; }
+                    Text {
+                        text: "Restoring snapshot " + root.confirm-restore-short-id + " on \"" + root.confirm-restore-vm-name + "\" replaces its current disk atomically. All current disk changes since that snapshot will be permanently lost.";
+                        color: #e2e8f0;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        Button { text: "Cancel"; clicked => { root.confirm-restore-visible = false; } }
+                        Button {
+                            text: "Restore Snapshot";
+                            primary: true;
+                            clicked => {
+                                root.confirm-restore-visible = false;
+                                root.confirm-restore-snapshot-action(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
                             }
                         }
                     }

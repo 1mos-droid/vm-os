@@ -45,9 +45,9 @@ impl NetworkPreset {
 
     pub fn plain_label(self) -> &'static str {
         match self {
-            Self::OfflineVault => "Offline Vault",
-            Self::SafeWeb => "Safe Web",
-            Self::HomeNetwork => "Home Network",
+            Self::OfflineVault => "Isolated · Offline",
+            Self::SafeWeb => "NAT · Internet Only",
+            Self::HomeNetwork => "Host-Only · Local",
         }
     }
 
@@ -57,7 +57,7 @@ impl NetworkPreset {
                 "Completely offline. Best for private documents, keys, and banking archives."
             }
             Self::SafeWeb => {
-                "Internet access only. Cannot reach your host computer or other Spaces."
+                "Public internet only. Local LAN, host services, and other Spaces are blocked."
             }
             Self::HomeNetwork => "Private link to this computer only. No internet access.",
         }
@@ -478,6 +478,7 @@ mod tests {
                 balloon_target_mib: 512,
                 network_mode: NetworkMode::Nat,
                 state: VmState::Running,
+                disposable: false,
             },
             Vm {
                 vm_id: "2".into(),
@@ -488,6 +489,7 @@ mod tests {
                 balloon_target_mib: 512,
                 network_mode: NetworkMode::Nat,
                 state: VmState::Stopped,
+                disposable: false,
             },
         ];
         let summary = compute_cow_storage_savings(&vms, &catalog);

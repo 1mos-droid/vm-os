@@ -1,9 +1,10 @@
 //! VMM backend abstraction and Unix domain socket JSON-RPC 2.0 client.
 
 use crate::rpc::{
-    decode_response_frame, encode_frame, method, CreateVmParams, EmptyParams, ListVmsResult,
-    NetworkMode, RpcError, RpcRequest, RpcResponse, SetBalloonRamParams, SetNetworkModeParams,
-    Snapshot, Vm, VmIdParams, DEFAULT_SOCKET_PATH, MAX_FRAME_BYTES,
+    decode_response_frame, encode_frame, method, Capture, CaptureIdParams, CreateVmParams,
+    EmptyParams, EmptyResult, ListCapturesResult, ListSnapshotsResult, ListVmsResult, NetworkMode,
+    RpcError, RpcRequest, RpcResponse, SetBalloonRamParams, SetNetworkModeParams, Snapshot,
+    SnapshotIdParams, Vm, VmIdParams, DEFAULT_SOCKET_PATH, MAX_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,15 +106,25 @@ pub trait VmmBackend {
     fn stop_vm(&mut self, vm_id: &str) -> Result<Vm, ClientError>;
     fn pause_vm(&mut self, vm_id: &str) -> Result<Vm, ClientError>;
     fn snapshot_vm(&mut self, vm_id: &str) -> Result<Snapshot, ClientError>;
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<Snapshot>, ClientError>;
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<Vm, ClientError>;
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), ClientError>;
     fn set_balloon_ram(&mut self, vm_id: &str, ram_mib: u32) -> Result<Vm, ClientError>;
     fn set_network_mode(
         &mut self,
         vm_id: &str,
         network_mode: NetworkMode,
     ) -> Result<Vm, ClientError>;
+    fn start_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError>;
+    fn stop_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError>;
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<Capture>, ClientError>;
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), ClientError>;
 
     /// Notify an in-memory mock backend that a Template Store image has been provisioned.
     fn register_template_image(&mut self, _image_id: &str) {}
+
+    /// Advance simulated capture byte counters in `--mock` mode (no-op on live daemon clients).
+    fn tick_mock_captures(&mut self) {}
 }
 
 /// Persistent AF_UNIX / SOCK_STREAM JSON-RPC 2.0 client for `/run/hyperos/vmm.sock`.
@@ -408,6 +419,43 @@ impl VmmBackend for UnixSocketClient {
         )
     }
 
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<Snapshot>, ClientError> {
+        let res: ListSnapshotsResult = self.call(
+            "lsnap",
+            method::LIST_SNAPSHOTS,
+            VmIdParams {
+                vm_id: vm_id.to_string(),
+            },
+            true,
+        )?;
+        Ok(res.snapshots)
+    }
+
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<Vm, ClientError> {
+        self.call(
+            "rsnap",
+            method::RESTORE_SNAPSHOT,
+            SnapshotIdParams {
+                vm_id: vm_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+            },
+            false,
+        )
+    }
+
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), ClientError> {
+        let _: EmptyResult = self.call(
+            "dsnap",
+            method::DELETE_SNAPSHOT,
+            SnapshotIdParams {
+                vm_id: vm_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+            },
+            false,
+        )?;
+        Ok(())
+    }
+
     fn set_balloon_ram(&mut self, vm_id: &str, ram_mib: u32) -> Result<Vm, ClientError> {
         self.call(
             "balloon",
@@ -434,6 +482,53 @@ impl VmmBackend for UnixSocketClient {
             },
             false,
         )
+    }
+
+    fn start_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError> {
+        self.call(
+            "capstart",
+            method::START_CAPTURE,
+            VmIdParams {
+                vm_id: vm_id.to_string(),
+            },
+            false,
+        )
+    }
+
+    fn stop_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError> {
+        self.call(
+            "capstop",
+            method::STOP_CAPTURE,
+            VmIdParams {
+                vm_id: vm_id.to_string(),
+            },
+            false,
+        )
+    }
+
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<Capture>, ClientError> {
+        let res: ListCapturesResult = self.call(
+            "caplist",
+            method::LIST_CAPTURES,
+            VmIdParams {
+                vm_id: vm_id.to_string(),
+            },
+            true,
+        )?;
+        Ok(res.captures)
+    }
+
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), ClientError> {
+        let _: EmptyResult = self.call(
+            "capdel",
+            method::DELETE_CAPTURE,
+            CaptureIdParams {
+                vm_id: vm_id.to_string(),
+                capture_id: capture_id.to_string(),
+            },
+            false,
+        )?;
+        Ok(())
     }
 }
 
@@ -562,7 +657,9 @@ mod tests {
     }
 
     #[test]
-    fn unix_socket_client_speaks_all_eight_methods_over_af_unix() {
+    fn unix_socket_client_speaks_all_fifteen_methods_over_af_unix() {
+        use crate::rpc::{error_code, CaptureState};
+
         let sock_path =
             std::env::temp_dir().join(format!("hyperos-vmm-test-{}.sock", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&sock_path);
@@ -596,21 +693,41 @@ mod tests {
                 vcpu_count: 2,
                 ram_mib: 1024,
                 network_mode: NetworkMode::Isolated,
+                disposable: false,
             })
             .unwrap();
         assert_eq!(created.state, VmState::Stopped);
+        assert!(!created.disposable);
         assert_eq!(created.balloon_target_mib, 1024);
 
         let net_changed = client
-            .set_network_mode(&created.vm_id, NetworkMode::HostOnly)
+            .set_network_mode(&created.vm_id, NetworkMode::Nat)
             .unwrap();
-        assert_eq!(net_changed.network_mode, NetworkMode::HostOnly);
+        assert_eq!(net_changed.network_mode, NetworkMode::Nat);
 
         let snap = client.snapshot_vm(&created.vm_id).unwrap();
         assert_eq!(snap.vm_id, created.vm_id);
+        let snaps = client.list_snapshots(&created.vm_id).unwrap();
+        assert_eq!(snaps, vec![snap.clone()]);
+
+        let restored = client
+            .restore_snapshot(&created.vm_id, &snap.snapshot_id)
+            .unwrap();
+        assert_eq!(restored.vm_id, created.vm_id);
 
         let started = client.start_vm(&created.vm_id).unwrap();
         assert_eq!(started.state, VmState::Running);
+
+        let cap = client.start_capture(&created.vm_id).unwrap();
+        assert_eq!(cap.state, CaptureState::Running);
+        let caps = client.list_captures(&created.vm_id).unwrap();
+        assert_eq!(caps.len(), 1);
+        let stopped_cap = client.stop_capture(&created.vm_id).unwrap();
+        assert_eq!(stopped_cap.state, CaptureState::Stopped);
+        client
+            .delete_capture(&created.vm_id, &cap.capture_id)
+            .unwrap();
+        assert!(client.list_captures(&created.vm_id).unwrap().is_empty());
 
         let ballooned = client.set_balloon_ram(&created.vm_id, 512).unwrap();
         assert_eq!(ballooned.balloon_target_mib, 512);
@@ -618,10 +735,43 @@ mod tests {
         let paused = client.pause_vm(&created.vm_id).unwrap();
         assert_eq!(paused.state, VmState::Paused);
 
+        // delete_snapshot succeeds in any state
+        client
+            .delete_snapshot(&created.vm_id, &snap.snapshot_id)
+            .unwrap();
+        assert!(client.list_snapshots(&created.vm_id).unwrap().is_empty());
+
         let stopped = client.stop_vm(&created.vm_id).unwrap();
         assert_eq!(stopped.state, VmState::Stopped);
 
-        assert_eq!(client.list_vms().unwrap().len(), 1);
+        // Disposable VM rejects snapshots (-32002), and isolated running VM rejects capture (-32004).
+        let disp = client
+            .create_vm(CreateVmParams {
+                name: "disp-iso".to_string(),
+                base_image_id: "alpine-3-21-virtio".to_string(),
+                vcpu_count: 1,
+                ram_mib: 512,
+                network_mode: NetworkMode::Isolated,
+                disposable: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            client.snapshot_vm(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+        client.start_vm(&disp.vm_id).unwrap();
+        assert!(matches!(
+            client.start_capture(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::UNAVAILABLE_CAPABILITY,
+                ..
+            }))
+        ));
+
+        assert_eq!(client.list_vms().unwrap().len(), 2);
 
         drop(client);
         server.join().unwrap();

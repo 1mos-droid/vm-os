@@ -59,7 +59,7 @@ pub enum WindowOrigin {
         vm_id: String,
         vm_name: String,
         network_mode: String,
-        ephemeral: bool,
+        disposable: bool,
     },
 }
 
@@ -71,7 +71,7 @@ impl WindowOrigin {
             Self::Vm {
                 vm_name,
                 network_mode,
-                ephemeral,
+                disposable,
                 ..
             } => {
                 let lower = vm_name.to_ascii_lowercase();
@@ -80,7 +80,7 @@ impl WindowOrigin {
                     || lower.contains("offline")
                 {
                     palette::VAULT_AMBER
-                } else if *ephemeral || lower.contains("browser") || lower.contains("disposable") {
+                } else if *disposable || lower.contains("browser") || lower.contains("disposable") {
                     palette::WEB_CYAN
                 } else if lower.contains("work") || lower.contains("pod") || lower.contains("dev") {
                     palette::WORK_EMERALD
@@ -100,17 +100,17 @@ impl WindowOrigin {
             Self::Vm {
                 vm_name,
                 network_mode,
-                ephemeral,
+                disposable,
                 ..
             } => {
                 let net_tag = match network_mode.as_str() {
                     "isolated" => "Offline",
-                    "nat" => "Web",
-                    "host-only" => "Local",
+                    "nat" => "NAT · Internet Only",
+                    "host-only" => "Host-Only",
                     other => other,
                 };
-                if *ephemeral {
-                    format!("{vm_name} · {net_tag} · Temp")
+                if *disposable {
+                    format!("{vm_name} · {net_tag} · Disposable")
                 } else {
                     format!("{vm_name} · {net_tag}")
                 }
@@ -178,7 +178,7 @@ mod tests {
             vm_id: "11111111-1111-1111-1111-111111111111".into(),
             vm_name: "Offline Vault".into(),
             network_mode: "isolated".into(),
-            ephemeral: false,
+            disposable: false,
         };
         assert_eq!(vault.accent_color(), palette::VAULT_AMBER);
         assert_eq!(vault.badge_label(), "Offline Vault · Offline");
@@ -187,10 +187,13 @@ mod tests {
             vm_id: "22222222-2222-2222-2222-222222222222".into(),
             vm_name: "Disposable Browser".into(),
             network_mode: "nat".into(),
-            ephemeral: true,
+            disposable: true,
         };
         assert_eq!(browser.accent_color(), palette::WEB_CYAN);
-        assert_eq!(browser.badge_label(), "Disposable Browser · Web · Temp");
+        assert_eq!(
+            browser.badge_label(),
+            "Disposable Browser · NAT · Internet Only · Disposable"
+        );
 
         let chrome = compute_origin_chrome(100, 80, 640, 480, browser.badge_label().len());
         assert_eq!(chrome.border_thickness, 2);

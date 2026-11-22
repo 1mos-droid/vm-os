@@ -13,12 +13,16 @@ pub const DEFAULT_SOCKET_PATH: &str = "/run/hyperos/vmm.sock";
 pub const STORAGE_ROOT: &str = "/var/lib/hyperos";
 pub const BASE_IMAGES_DIR: &str = "/var/lib/hyperos/base-images";
 pub const INSTANCES_DIR: &str = "/var/lib/hyperos/instances";
+pub const CAPTURES_DIR: &str = "/var/lib/hyperos/captures";
 
 /// Maximum frame length in bytes including the trailing LF (`\n`).
 pub const MAX_FRAME_BYTES: usize = 65_536;
 
 /// MiB definition used throughout HyperOS (`ARCHITECTURE.md`).
 pub const MIB_BYTES: u64 = 1_048_576;
+
+/// Maximum per-capture pcap file size (`256 MiB`, `ARCHITECTURE.md` Contract v2).
+pub const CAPTURE_MAX_BYTES: u64 = 256 * MIB_BYTES;
 
 /// Host RAM reserved for HyperOS base OS (`MemTotal - 768 MiB` admission limit).
 pub const HOST_RAM_RESERVE_MIB: u64 = 768;
@@ -48,16 +52,23 @@ pub mod error_code {
     pub const IO_FAILURE: i64 = -32005;
 }
 
-/// RPC method names defined in `ARCHITECTURE.md`.
+/// RPC method names defined in `ARCHITECTURE.md` (v1 + Contract v2).
 pub mod method {
     pub const CREATE_VM: &str = "create_vm";
     pub const START_VM: &str = "start_vm";
     pub const STOP_VM: &str = "stop_vm";
     pub const PAUSE_VM: &str = "pause_vm";
     pub const SNAPSHOT_VM: &str = "snapshot_vm";
+    pub const LIST_SNAPSHOTS: &str = "list_snapshots";
+    pub const RESTORE_SNAPSHOT: &str = "restore_snapshot";
+    pub const DELETE_SNAPSHOT: &str = "delete_snapshot";
     pub const SET_BALLOON_RAM: &str = "set_balloon_ram";
     pub const SET_NETWORK_MODE: &str = "set_network_mode";
     pub const LIST_VMS: &str = "list_vms";
+    pub const START_CAPTURE: &str = "start_capture";
+    pub const STOP_CAPTURE: &str = "stop_capture";
+    pub const LIST_CAPTURES: &str = "list_captures";
+    pub const DELETE_CAPTURE: &str = "delete_capture";
 }
 
 /// Validate a JSON-RPC request ID: 1-64 ASCII letters, digits, `_`, or `-`.
@@ -201,7 +212,7 @@ impl fmt::Display for VmState {
     }
 }
 
-/// VM object schema (`ARCHITECTURE.md` — all 8 keys required, no unknown keys).
+/// VM object schema (`ARCHITECTURE.md` Contract v2 — all 9 keys required, no unknown keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Vm {
@@ -213,6 +224,7 @@ pub struct Vm {
     pub balloon_target_mib: u32,
     pub network_mode: NetworkMode,
     pub state: VmState,
+    pub disposable: bool,
 }
 
 /// Snapshot object schema (`ARCHITECTURE.md` — all 3 keys required, no unknown keys).
@@ -224,6 +236,55 @@ pub struct Snapshot {
     pub created_at: String,
 }
 
+/// Exact packet capture `state` values (`ARCHITECTURE.md` Contract v2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureState {
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "stopped")]
+    Stopped,
+    #[serde(rename = "limit_reached")]
+    LimitReached,
+}
+
+impl CaptureState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::LimitReached => "limit_reached",
+        }
+    }
+}
+
+impl fmt::Display for CaptureState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Packet Capture object schema (`ARCHITECTURE.md` Contract v2 — all 5 keys required, no unknown keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capture {
+    pub capture_id: String,
+    pub vm_id: String,
+    pub started_at: String,
+    pub state: CaptureState,
+    pub bytes: u64,
+}
+
+/// Format capture byte counter in human-readable IEC units for UI status labels.
+pub fn format_capture_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < MIB_BYTES {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB_BYTES as f64)
+    }
+}
+
 /// `list_vms` result schema (`ARCHITECTURE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,7 +292,26 @@ pub struct ListVmsResult {
     pub vms: Vec<Vm>,
 }
 
-/// `create_vm` params schema (`ARCHITECTURE.md`).
+/// `list_snapshots` result schema (`ARCHITECTURE.md` Contract v2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListSnapshotsResult {
+    pub snapshots: Vec<Snapshot>,
+}
+
+/// `list_captures` result schema (`ARCHITECTURE.md` Contract v2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListCapturesResult {
+    pub captures: Vec<Capture>,
+}
+
+/// Empty `{}` result schema for `delete_snapshot` and `delete_capture`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyResult {}
+
+/// `create_vm` params schema (`ARCHITECTURE.md` Contract v2 — all 6 keys required, no defaults).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateVmParams {
@@ -240,13 +320,31 @@ pub struct CreateVmParams {
     pub vcpu_count: u32,
     pub ram_mib: u32,
     pub network_mode: NetworkMode,
+    pub disposable: bool,
 }
 
-/// Params for `start_vm`, `stop_vm`, `pause_vm`, and `snapshot_vm`.
+/// Params for `start_vm`, `stop_vm`, `pause_vm`, `snapshot_vm`, `list_snapshots`,
+/// `start_capture`, `stop_capture`, and `list_captures`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmIdParams {
     pub vm_id: String,
+}
+
+/// Params for `restore_snapshot` and `delete_snapshot`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotIdParams {
+    pub vm_id: String,
+    pub snapshot_id: String,
+}
+
+/// Params for `delete_capture`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureIdParams {
+    pub vm_id: String,
+    pub capture_id: String,
 }
 
 /// `set_balloon_ram` params schema (`ARCHITECTURE.md`).
@@ -336,9 +434,16 @@ pub enum RpcMethodCall {
     StopVm(VmIdParams),
     PauseVm(VmIdParams),
     SnapshotVm(VmIdParams),
+    ListSnapshots(VmIdParams),
+    RestoreSnapshot(SnapshotIdParams),
+    DeleteSnapshot(SnapshotIdParams),
     SetBalloonRam(SetBalloonRamParams),
     SetNetworkMode(SetNetworkModeParams),
     ListVms(EmptyParams),
+    StartCapture(VmIdParams),
+    StopCapture(VmIdParams),
+    ListCaptures(VmIdParams),
+    DeleteCapture(CaptureIdParams),
 }
 
 impl RpcMethodCall {
@@ -349,9 +454,16 @@ impl RpcMethodCall {
             Self::StopVm(_) => method::STOP_VM,
             Self::PauseVm(_) => method::PAUSE_VM,
             Self::SnapshotVm(_) => method::SNAPSHOT_VM,
+            Self::ListSnapshots(_) => method::LIST_SNAPSHOTS,
+            Self::RestoreSnapshot(_) => method::RESTORE_SNAPSHOT,
+            Self::DeleteSnapshot(_) => method::DELETE_SNAPSHOT,
             Self::SetBalloonRam(_) => method::SET_BALLOON_RAM,
             Self::SetNetworkMode(_) => method::SET_NETWORK_MODE,
             Self::ListVms(_) => method::LIST_VMS,
+            Self::StartCapture(_) => method::START_CAPTURE,
+            Self::StopCapture(_) => method::STOP_CAPTURE,
+            Self::ListCaptures(_) => method::LIST_CAPTURES,
+            Self::DeleteCapture(_) => method::DELETE_CAPTURE,
         }
     }
 }
@@ -373,7 +485,15 @@ impl Serialize for RpcMethodEnvelope {
             RpcMethodCall::StartVm(p)
             | RpcMethodCall::StopVm(p)
             | RpcMethodCall::PauseVm(p)
-            | RpcMethodCall::SnapshotVm(p) => map.serialize_entry("params", p)?,
+            | RpcMethodCall::SnapshotVm(p)
+            | RpcMethodCall::ListSnapshots(p)
+            | RpcMethodCall::StartCapture(p)
+            | RpcMethodCall::StopCapture(p)
+            | RpcMethodCall::ListCaptures(p) => map.serialize_entry("params", p)?,
+            RpcMethodCall::RestoreSnapshot(p) | RpcMethodCall::DeleteSnapshot(p) => {
+                map.serialize_entry("params", p)?;
+            }
+            RpcMethodCall::DeleteCapture(p) => map.serialize_entry("params", p)?,
             RpcMethodCall::SetBalloonRam(p) => map.serialize_entry("params", p)?,
             RpcMethodCall::SetNetworkMode(p) => map.serialize_entry("params", p)?,
             RpcMethodCall::ListVms(p) => map.serialize_entry("params", p)?,
@@ -425,6 +545,15 @@ impl<'de> Deserialize<'de> for RpcMethodEnvelope {
             method::SNAPSHOT_VM => RpcMethodCall::SnapshotVm(
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
+            method::LIST_SNAPSHOTS => RpcMethodCall::ListSnapshots(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::RESTORE_SNAPSHOT => RpcMethodCall::RestoreSnapshot(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::DELETE_SNAPSHOT => RpcMethodCall::DeleteSnapshot(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
             method::SET_BALLOON_RAM => RpcMethodCall::SetBalloonRam(
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
@@ -432,6 +561,18 @@ impl<'de> Deserialize<'de> for RpcMethodEnvelope {
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
             method::LIST_VMS => RpcMethodCall::ListVms(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::START_CAPTURE => RpcMethodCall::StartCapture(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::STOP_CAPTURE => RpcMethodCall::StopCapture(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::LIST_CAPTURES => RpcMethodCall::ListCaptures(
+                serde_json::from_value(raw.params).map_err(de::Error::custom)?,
+            ),
+            method::DELETE_CAPTURE => RpcMethodCall::DeleteCapture(
                 serde_json::from_value(raw.params).map_err(de::Error::custom)?,
             ),
             other => {
@@ -658,6 +799,7 @@ mod tests {
 
     const SAMPLE_VM_ID: &str = "b6f51eed-8dc7-47f6-a8e7-81b6ae783a21";
     const SAMPLE_SNAP_ID: &str = "4f281e57-3717-40fe-9d90-025f37962bbd";
+    const SAMPLE_CAPTURE_ID: &str = "0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e91";
 
     fn sample_vm() -> Vm {
         Vm {
@@ -669,6 +811,7 @@ mod tests {
             balloon_target_mib: 1024,
             network_mode: NetworkMode::Isolated,
             state: VmState::Stopped,
+            disposable: false,
         }
     }
 
@@ -682,17 +825,18 @@ mod tests {
                 vcpu_count: 1,
                 ram_mib: 1024,
                 network_mode: NetworkMode::Isolated,
+                disposable: false,
             }),
         };
         let wire = serde_json::to_string(&req).unwrap();
         assert_eq!(
             wire,
-            r#"{"jsonrpc":"2.0","id":"create-1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated"}}"#
+            r#"{"jsonrpc":"2.0","id":"create-1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated","disposable":false}}"#
         );
         let parsed: RpcMethodEnvelope = serde_json::from_str(&wire).unwrap();
         assert_eq!(parsed, req);
 
-        let resp_wire = r#"{"jsonrpc":"2.0","id":"create-1","result":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"balloon_target_mib":1024,"network_mode":"isolated","state":"stopped"}}"#;
+        let resp_wire = r#"{"jsonrpc":"2.0","id":"create-1","result":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"balloon_target_mib":1024,"network_mode":"isolated","state":"stopped","disposable":false}}"#;
         let resp: RpcResponse<Vm> = serde_json::from_str(resp_wire).unwrap();
         assert_eq!(
             resp,
@@ -921,9 +1065,158 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_fields_and_invalid_numeric_types() {
+    fn snapshot_and_capture_contract_v2_methods_roundtrip_verbatim() {
+        let list_snaps_req = RpcMethodEnvelope {
+            id: "lsnap-1".to_string(),
+            call: RpcMethodCall::ListSnapshots(VmIdParams {
+                vm_id: SAMPLE_VM_ID.to_string(),
+            }),
+        };
+        let wire = serde_json::to_string(&list_snaps_req).unwrap();
+        assert_eq!(
+            wire,
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"lsnap-1","method":"list_snapshots","params":{{"vm_id":"{SAMPLE_VM_ID}"}}}}"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&wire).unwrap(),
+            list_snaps_req
+        );
+
+        let restore_req = RpcMethodEnvelope {
+            id: "rsnap-1".to_string(),
+            call: RpcMethodCall::RestoreSnapshot(SnapshotIdParams {
+                vm_id: SAMPLE_VM_ID.to_string(),
+                snapshot_id: SAMPLE_SNAP_ID.to_string(),
+            }),
+        };
+        let restore_wire = serde_json::to_string(&restore_req).unwrap();
+        assert_eq!(
+            restore_wire,
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"rsnap-1","method":"restore_snapshot","params":{{"vm_id":"{SAMPLE_VM_ID}","snapshot_id":"{SAMPLE_SNAP_ID}"}}}}"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&restore_wire).unwrap(),
+            restore_req
+        );
+
+        let del_snap_req = RpcMethodEnvelope {
+            id: "dsnap-1".to_string(),
+            call: RpcMethodCall::DeleteSnapshot(SnapshotIdParams {
+                vm_id: SAMPLE_VM_ID.to_string(),
+                snapshot_id: SAMPLE_SNAP_ID.to_string(),
+            }),
+        };
+        let del_snap_wire = serde_json::to_string(&del_snap_req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&del_snap_wire).unwrap(),
+            del_snap_req
+        );
+
+        let empty_resp: RpcResponse<EmptyResult> =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":"dsnap-1","result":{}}"#).unwrap();
+        assert_eq!(
+            empty_resp,
+            RpcResponse::Success {
+                id: "dsnap-1".to_string(),
+                result: EmptyResult {},
+            }
+        );
+
+        let capture_wire = r#"{"jsonrpc":"2.0","id":"cap-1","result":{"capture_id":"0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e91","vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","started_at":"2026-11-22T00:00:00Z","state":"running","bytes":0}}"#;
+        let cap_resp: RpcResponse<Capture> = serde_json::from_str(capture_wire).unwrap();
+        assert_eq!(
+            cap_resp,
+            RpcResponse::Success {
+                id: "cap-1".to_string(),
+                result: Capture {
+                    capture_id: SAMPLE_CAPTURE_ID.to_string(),
+                    vm_id: SAMPLE_VM_ID.to_string(),
+                    started_at: "2026-11-22T00:00:00Z".to_string(),
+                    state: CaptureState::Running,
+                    bytes: 0,
+                },
+            }
+        );
+        assert_eq!(serde_json::to_string(&cap_resp).unwrap(), capture_wire);
+
+        for (id, method_name, call) in [
+            (
+                "startcap-1",
+                "start_capture",
+                RpcMethodCall::StartCapture(VmIdParams {
+                    vm_id: SAMPLE_VM_ID.to_string(),
+                }),
+            ),
+            (
+                "stopcap-1",
+                "stop_capture",
+                RpcMethodCall::StopCapture(VmIdParams {
+                    vm_id: SAMPLE_VM_ID.to_string(),
+                }),
+            ),
+            (
+                "listcap-1",
+                "list_captures",
+                RpcMethodCall::ListCaptures(VmIdParams {
+                    vm_id: SAMPLE_VM_ID.to_string(),
+                }),
+            ),
+        ] {
+            let env = RpcMethodEnvelope {
+                id: id.to_string(),
+                call,
+            };
+            let w = serde_json::to_string(&env).unwrap();
+            assert_eq!(
+                w,
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":"{id}","method":"{method_name}","params":{{"vm_id":"{SAMPLE_VM_ID}"}}}}"#
+                )
+            );
+            assert_eq!(serde_json::from_str::<RpcMethodEnvelope>(&w).unwrap(), env);
+        }
+
+        let del_cap_req = RpcMethodEnvelope {
+            id: "delcap-1".to_string(),
+            call: RpcMethodCall::DeleteCapture(CaptureIdParams {
+                vm_id: SAMPLE_VM_ID.to_string(),
+                capture_id: SAMPLE_CAPTURE_ID.to_string(),
+            }),
+        };
+        let del_cap_wire = serde_json::to_string(&del_cap_req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RpcMethodEnvelope>(&del_cap_wire).unwrap(),
+            del_cap_req
+        );
+
+        let limit_cap: RpcResponse<ListCapturesResult> = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":"lcap-1","result":{"captures":[{"capture_id":"0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e91","vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","started_at":"2026-11-22T00:00:00Z","state":"limit_reached","bytes":268435456}]}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            limit_cap,
+            RpcResponse::Success {
+                result: ListCapturesResult { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_fields_missing_disposable_and_invalid_numeric_types() {
+        // Missing required `disposable` on create_vm or Vm must be rejected (no implicit defaults)
+        let missing_disposable_req = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated"}}"#;
+        assert!(serde_json::from_str::<RpcMethodEnvelope>(missing_disposable_req).is_err());
+
+        let missing_disposable_vm = r#"{"jsonrpc":"2.0","id":"c1","result":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"balloon_target_mib":1024,"network_mode":"isolated","state":"stopped"}}"#;
+        assert!(serde_json::from_str::<RpcResponse<Vm>>(missing_disposable_vm).is_err());
+
         // Unknown key on create_vm params
-        let unknown_param = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated","ephemeral":true}}"#;
+        let unknown_param = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated","disposable":true,"ephemeral":true}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(unknown_param).is_err());
 
         // Unknown key on list_vms params
@@ -932,18 +1225,42 @@ mod tests {
         assert!(serde_json::from_str::<RpcMethodEnvelope>(unknown_list).is_err());
 
         // Unknown key on VM response
-        let unknown_vm_key = r#"{"jsonrpc":"2.0","id":"c1","result":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"balloon_target_mib":1024,"network_mode":"isolated","state":"stopped","extra":1}}"#;
+        let unknown_vm_key = r#"{"jsonrpc":"2.0","id":"c1","result":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024,"balloon_target_mib":1024,"network_mode":"isolated","state":"stopped","disposable":false,"extra":1}}"#;
         assert!(serde_json::from_str::<RpcResponse<Vm>>(unknown_vm_key).is_err());
 
-        // Float, boolean, and numeric string rejected for integer fields
-        let float_ram = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024.0,"network_mode":"isolated"}}"#;
+        // Unknown keys on v2 snapshot/capture types
+        let unknown_restore = format!(
+            r#"{{"jsonrpc":"2.0","id":"r1","method":"restore_snapshot","params":{{"vm_id":"{SAMPLE_VM_ID}","snapshot_id":"{SAMPLE_SNAP_ID}","force":true}}}}"#
+        );
+        assert!(serde_json::from_str::<RpcMethodEnvelope>(&unknown_restore).is_err());
+
+        let unknown_cap = format!(
+            r#"{{"jsonrpc":"2.0","id":"c2","result":{{"capture_id":"{SAMPLE_CAPTURE_ID}","vm_id":"{SAMPLE_VM_ID}","started_at":"2026-11-22T00:00:00Z","state":"running","bytes":0,"path":"/tmp/x.pcap"}}}}"#
+        );
+        assert!(serde_json::from_str::<RpcResponse<Capture>>(&unknown_cap).is_err());
+
+        let unknown_empty = r#"{"jsonrpc":"2.0","id":"d1","result":{"deleted":true}}"#;
+        assert!(serde_json::from_str::<RpcResponse<EmptyResult>>(unknown_empty).is_err());
+
+        // Float, boolean, and numeric string rejected for integer fields (including Capture.bytes)
+        let float_ram = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":1,"ram_mib":1024.0,"network_mode":"isolated","disposable":false}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(float_ram).is_err());
 
-        let string_vcpu = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":"1","ram_mib":1024,"network_mode":"isolated"}}"#;
+        let string_vcpu = r#"{"jsonrpc":"2.0","id":"c1","method":"create_vm","params":{"name":"demo","base_image_id":"linux-demo","vcpu_count":"1","ram_mib":1024,"network_mode":"isolated","disposable":false}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(string_vcpu).is_err());
 
         let bool_ram = r#"{"jsonrpc":"2.0","id":"b1","method":"set_balloon_ram","params":{"vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","ram_mib":true}}"#;
         assert!(serde_json::from_str::<RpcMethodEnvelope>(bool_ram).is_err());
+
+        let float_bytes = format!(
+            r#"{{"jsonrpc":"2.0","id":"c3","result":{{"capture_id":"{SAMPLE_CAPTURE_ID}","vm_id":"{SAMPLE_VM_ID}","started_at":"2026-11-22T00:00:00Z","state":"running","bytes":12.5}}}}"#
+        );
+        assert!(serde_json::from_str::<RpcResponse<Capture>>(&float_bytes).is_err());
+
+        let string_bytes = format!(
+            r#"{{"jsonrpc":"2.0","id":"c4","result":{{"capture_id":"{SAMPLE_CAPTURE_ID}","vm_id":"{SAMPLE_VM_ID}","started_at":"2026-11-22T00:00:00Z","state":"paused","bytes":0}}}}"#
+        );
+        assert!(serde_json::from_str::<RpcResponse<Capture>>(&string_bytes).is_err());
 
         let float_error_code =
             r#"{"jsonrpc":"2.0","id":"e1","error":{"code":-32602.0,"message":"bad"}}"#;

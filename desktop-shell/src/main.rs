@@ -8,8 +8,9 @@ use desktop_shell::layout::{Rect, SnapZone, TOP_RAIL_HEIGHT_PX};
 use desktop_shell::origin::{Rgb, WindowOrigin};
 use desktop_shell::sys_status::SystemStatus;
 use desktop_shell::vmm_bridge::{
-    launch_environment_preset, reclaim_idle_ram, EnvironmentPreset, MockShellVmmBridge,
-    ShellVmmBridge, UnixVmmBridge, VmSummary, DEFAULT_VMM_SOCKET,
+    format_capture_bytes, launch_environment_preset, network_badge_label, reclaim_idle_ram,
+    CaptureSummary, EnvironmentPreset, MockShellVmmBridge, ShellVmmBridge, SnapshotSummary,
+    UnixVmmBridge, VmSummary, DEFAULT_VMM_SOCKET,
 };
 use slint::{Color, ModelRc, SharedString, VecModel};
 #[cfg(feature = "winit")]
@@ -91,6 +92,8 @@ struct ShellRuntime {
     bridge: Box<dyn ShellVmmBridge>,
     mock_mode: bool,
     vms: Vec<VmSummary>,
+    snapshots: Vec<SnapshotSummary>,
+    captures: Vec<CaptureSummary>,
     vmm_connected: bool,
     vmm_error: Option<String>,
     sys: SystemStatus,
@@ -120,6 +123,18 @@ fn sync_shell_ui(ui: &HyperShellWindow, rt: &mut ShellRuntime) {
             rt.vms = vms;
             rt.vmm_connected = true;
             rt.vmm_error = None;
+            let mut snaps = Vec::new();
+            let mut caps = Vec::new();
+            for vm in &rt.vms {
+                if let Ok(mut s) = rt.bridge.list_snapshots(&vm.vm_id) {
+                    snaps.append(&mut s);
+                }
+                if let Ok(mut c) = rt.bridge.list_captures(&vm.vm_id) {
+                    caps.append(&mut c);
+                }
+            }
+            rt.snapshots = snaps;
+            rt.captures = caps;
         }
         Err(err) => {
             rt.vmm_connected = false;
@@ -139,12 +154,19 @@ fn sync_shell_ui(ui: &HyperShellWindow, rt: &mut ShellRuntime) {
                 vm_id: vm.vm_id.clone(),
                 vm_name: vm.name.clone(),
                 network_mode: vm.network_mode.clone(),
-                ephemeral: vm.name.to_ascii_lowercase().contains("disposable"),
+                disposable: vm.disposable,
             };
+            let capturing = rt
+                .captures
+                .iter()
+                .any(|c| c.vm_id == vm.vm_id && c.state == "running");
             SpacePill {
                 vm_id: SharedString::from(vm.vm_id.as_str()),
                 name: SharedString::from(vm.name.as_str()),
                 ram_label: SharedString::from(format!("{}M", vm.balloon_target_mib)),
+                network_badge: SharedString::from(network_badge_label(&vm.network_mode)),
+                disposable: vm.disposable,
+                capturing,
                 accent: rgb_to_slint(origin.accent_color()),
                 active: rt.compositor.active_space_key == vm.vm_id,
                 running: vm.state == "running",
@@ -152,6 +174,73 @@ fn sync_shell_ui(ui: &HyperShellWindow, rt: &mut ShellRuntime) {
         })
         .collect();
     ui.set_space_pills(ModelRc::new(VecModel::from(pills)));
+
+    // Sync Active Space Research Controls in Action Deck
+    let selected_vm = rt
+        .vms
+        .iter()
+        .find(|v| v.vm_id == rt.compositor.active_space_key)
+        .or_else(|| rt.vms.first());
+    if let Some(vm) = selected_vm {
+        let capture_supported = vm.network_mode != "isolated";
+        let active_cap = rt
+            .captures
+            .iter()
+            .find(|c| c.vm_id == vm.vm_id && c.state == "running");
+        let capture_status = if let Some(c) = active_cap {
+            format!("● Capturing · {}", format_capture_bytes(c.bytes))
+        } else if !capture_supported {
+            "Capture N/A (isolated)".to_string()
+        } else if let Some(latest) = rt.captures.iter().rfind(|c| c.vm_id == vm.vm_id) {
+            format!("{} · {}", latest.state, format_capture_bytes(latest.bytes))
+        } else {
+            "Capture Idle".to_string()
+        };
+
+        ui.set_selected_vm_id(SharedString::from(vm.vm_id.as_str()));
+        ui.set_selected_vm_name(SharedString::from(vm.name.as_str()));
+        ui.set_selected_vm_state(SharedString::from(vm.state.as_str()));
+        ui.set_selected_vm_network_badge(SharedString::from(network_badge_label(&vm.network_mode)));
+        ui.set_selected_vm_disposable(vm.disposable);
+        ui.set_selected_capture_supported(capture_supported);
+        ui.set_selected_capture_active(active_cap.is_some());
+        ui.set_selected_capture_status(SharedString::from(capture_status));
+
+        let snap_items: Vec<ShellSnapshotItem> = rt
+            .snapshots
+            .iter()
+            .filter(|s| s.vm_id == vm.vm_id)
+            .map(|s| ShellSnapshotItem {
+                snapshot_id: SharedString::from(s.snapshot_id.as_str()),
+                short_id: SharedString::from(s.snapshot_id.chars().take(8).collect::<String>()),
+                vm_id: SharedString::from(s.vm_id.as_str()),
+                created_at: SharedString::from(s.created_at.as_str()),
+                can_restore: !vm.disposable && vm.state == "stopped",
+            })
+            .collect();
+        ui.set_selected_snapshots(ModelRc::new(VecModel::from(snap_items)));
+
+        let cap_items: Vec<ShellCaptureItem> = rt
+            .captures
+            .iter()
+            .filter(|c| c.vm_id == vm.vm_id)
+            .map(|c| ShellCaptureItem {
+                capture_id: SharedString::from(c.capture_id.as_str()),
+                short_id: SharedString::from(c.capture_id.chars().take(8).collect::<String>()),
+                vm_id: SharedString::from(c.vm_id.as_str()),
+                started_at: SharedString::from(c.started_at.as_str()),
+                state: SharedString::from(c.state.as_str()),
+                bytes_label: SharedString::from(format_capture_bytes(c.bytes)),
+            })
+            .collect();
+        ui.set_selected_captures(ModelRc::new(VecModel::from(cap_items)));
+    } else {
+        ui.set_selected_vm_id(SharedString::from(""));
+        ui.set_selected_snapshots(ModelRc::new(
+            VecModel::from(Vec::<ShellSnapshotItem>::new()),
+        ));
+        ui.set_selected_captures(ModelRc::new(VecModel::from(Vec::<ShellCaptureItem>::new())));
+    }
 
     // Sync system status pills
     ui.set_host_zram_label(SharedString::from(rt.sys.compact_memory_label()));
@@ -209,7 +298,7 @@ fn seed_mock_workspace_windows(compositor: &mut HyperShellState, vms: &[VmSummar
             vm_id: work.vm_id.clone(),
             vm_name: work.name.clone(),
             network_mode: work.network_mode.clone(),
-            ephemeral: false,
+            disposable: work.disposable,
         };
         let rect = SnapZone::LeftHalf.target_rect(out_w, out_h);
         let id = compositor.register_managed_window(
@@ -228,7 +317,7 @@ fn seed_mock_workspace_windows(compositor: &mut HyperShellState, vms: &[VmSummar
             vm_id: browser.vm_id.clone(),
             vm_name: browser.name.clone(),
             network_mode: browser.network_mode.clone(),
-            ephemeral: true,
+            disposable: browser.disposable,
         };
         let rect = SnapZone::RightHalf.target_rect(out_w, out_h);
         let id = compositor.register_managed_window(
@@ -360,14 +449,19 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
                     "work-pod" => EnvironmentPreset::WorkPod,
                     _ => EnvironmentPreset::OfflineVault,
                 };
+                let force_disp = if ui.get_deck_launch_disposable() {
+                    Some(true)
+                } else {
+                    None
+                };
                 let mut st = rt.borrow_mut();
-                match launch_environment_preset(st.bridge.as_mut(), preset) {
+                match launch_environment_preset(st.bridge.as_mut(), preset, force_disp) {
                     Ok(vm) => {
                         let origin = WindowOrigin::Vm {
                             vm_id: vm.vm_id.clone(),
                             vm_name: vm.name.clone(),
                             network_mode: vm.network_mode.clone(),
-                            ephemeral: preset.is_ephemeral(),
+                            disposable: vm.disposable,
                         };
                         let spawn_rect = Rect::new(220, TOP_RAIL_HEIGHT_PX + 70, 620, 420);
                         let wid = st.compositor.register_managed_window(
@@ -381,15 +475,178 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
                             .snap_window(wid, SnapZone::RightHalf, Instant::now());
                         st.compositor.active_space_key = vm.vm_id;
                         st.compositor.action_deck.close();
+                        ui.set_deck_launch_disposable(false);
                         ui.set_rail_toast(SharedString::from(format!(
-                            "Launched {} ({} MiB)",
+                            "Launched {} ({} MiB{})",
                             preset.title(),
-                            vm.ram_mib
+                            vm.ram_mib,
+                            if vm.disposable { " · Disposable" } else { "" }
                         )));
                     }
                     Err(err) => {
                         ui.set_rail_toast(SharedString::from(format!("Launch failed: {err}")));
                     }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    // Active Space Research Controls (Start / Force Stop / Snapshot Save, Restore, Delete / Packet Capture)
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_start_vm_action(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.start_vm(vm_id.as_str()) {
+                    Ok(vm) => ui
+                        .set_rail_toast(SharedString::from(format!("Started Space '{}'", vm.name))),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Start failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_confirm_stop_vm_action(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.stop_vm(vm_id.as_str()) {
+                    Ok(vm) => {
+                        let extra = if vm.disposable {
+                            " (disposable disk reset)"
+                        } else {
+                            ""
+                        };
+                        ui.set_rail_toast(SharedString::from(format!(
+                            "Closed Space '{}'{}",
+                            vm.name, extra
+                        )));
+                    }
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Stop failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_snapshot_vm_action(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.snapshot_vm(vm_id.as_str()) {
+                    Ok(snap) => ui.set_rail_toast(SharedString::from(format!(
+                        "Saved snapshot {}",
+                        &snap.snapshot_id[..8.min(snap.snapshot_id.len())]
+                    ))),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Snapshot failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_confirm_restore_snapshot_action(move |vm_id, snap_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.restore_snapshot(vm_id.as_str(), snap_id.as_str()) {
+                    Ok(vm) => ui.set_rail_toast(SharedString::from(format!(
+                        "Restored snapshot onto '{}'",
+                        vm.name
+                    ))),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Restore failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_delete_snapshot_action(move |vm_id, snap_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.delete_snapshot(vm_id.as_str(), snap_id.as_str()) {
+                    Ok(()) => ui.set_rail_toast(SharedString::from("Deleted snapshot")),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Delete failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_start_capture_action(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.start_capture(vm_id.as_str()) {
+                    Ok(cap) => ui.set_rail_toast(SharedString::from(format!(
+                        "Capturing packets ({})",
+                        &cap.capture_id[..8.min(cap.capture_id.len())]
+                    ))),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Capture failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_stop_capture_action(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.stop_capture(vm_id.as_str()) {
+                    Ok(cap) => ui.set_rail_toast(SharedString::from(format!(
+                        "Stopped capture ({}, {})",
+                        cap.state,
+                        format_capture_bytes(cap.bytes)
+                    ))),
+                    Err(err) => {
+                        ui.set_rail_toast(SharedString::from(format!("Stop capture failed: {err}")))
+                    }
+                }
+                sync_shell_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        ui.on_delete_capture_action(move |vm_id, cap_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                match st.bridge.delete_capture(vm_id.as_str(), cap_id.as_str()) {
+                    Ok(()) => ui.set_rail_toast(SharedString::from("Deleted packet capture")),
+                    Err(err) => ui.set_rail_toast(SharedString::from(format!(
+                        "Delete capture failed: {err}"
+                    ))),
                 }
                 sync_shell_ui(&ui, &mut st);
             }
@@ -579,6 +836,8 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         bridge,
         mock_mode: cli.mock,
         vms: Vec::new(),
+        snapshots: Vec::new(),
+        captures: Vec::new(),
         vmm_connected: true,
         vmm_error: None,
         sys: SystemStatus::read(cli.mock, None),
@@ -623,7 +882,11 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         let rt = Rc::clone(&rt);
         move || {
             if let Some(ui) = ui_weak.upgrade() {
-                sync_shell_ui(&ui, &mut rt.borrow_mut());
+                let mut st = rt.borrow_mut();
+                if st.mock_mode {
+                    st.bridge.tick_mock_captures();
+                }
+                sync_shell_ui(&ui, &mut st);
             }
         }
     };
@@ -650,6 +913,8 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         bridge,
         mock_mode: cli.mock,
         vms: Vec::new(),
+        snapshots: Vec::new(),
+        captures: Vec::new(),
         vmm_connected: true,
         vmm_error: None,
         sys: SystemStatus::read(cli.mock, None),
@@ -683,7 +948,11 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         let rt = Rc::clone(&rt);
         telemetry_timer.start(TimerMode::Repeated, Duration::from_secs(2), move || {
             if let Some(ui) = ui_weak.upgrade() {
-                sync_shell_ui(&ui, &mut rt.borrow_mut());
+                let mut st = rt.borrow_mut();
+                if st.mock_mode {
+                    st.bridge.tick_mock_captures();
+                }
+                sync_shell_ui(&ui, &mut st);
             }
         });
     }
@@ -771,6 +1040,8 @@ mod tests {
             bridge,
             mock_mode: true,
             vms,
+            snapshots: Vec::new(),
+            captures: Vec::new(),
             vmm_connected: true,
             vmm_error: None,
             sys: SystemStatus::read(true, None),
@@ -783,6 +1054,12 @@ mod tests {
         assert_eq!(ui.get_windows().row_count(), 3);
         assert!(!ui.get_action_deck_visible());
 
+        let work_pill = ui.get_space_pills().row_data(0).unwrap();
+        assert_eq!(work_pill.network_badge, "NAT · Internet Only");
+        assert!(!work_pill.disposable);
+        let disp_pill = ui.get_space_pills().row_data(1).unwrap();
+        assert!(disp_pill.disposable);
+
         // Render Workspace + Top Context Rail into software buffer
         let mut fb = vec![Rgb565Pixel(0); 1280 * 760];
         window.draw_if_needed(|r| {
@@ -793,7 +1070,7 @@ mod tests {
         ui.invoke_reclaim_ram_clicked();
         assert!(ui.get_rail_toast().contains("Reclaimed "));
 
-        // Toggle Super-key Action Deck, search "vault", and launch Offline Vault
+        // Toggle Super-key Action Deck, search "vault", check Disposable toggle, and launch Offline Vault
         ui.invoke_toggle_action_deck();
         assert!(ui.get_action_deck_visible());
         ui.invoke_deck_query_changed(SharedString::from("vault"));
@@ -802,10 +1079,39 @@ mod tests {
             r.render(&mut fb, 1280);
         });
 
+        ui.set_deck_launch_disposable(true);
         ui.invoke_launch_preset(SharedString::from("offline-vault"));
         assert!(!ui.get_action_deck_visible());
         assert_eq!(ui.get_space_pills().row_count(), 4);
         assert_eq!(ui.get_windows().row_count(), 4);
+        assert!(ui.get_selected_vm_disposable());
+
+        // Switch to Work Pod (NAT) -> start/stop/delete capture
+        ui.invoke_activate_space(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        assert_eq!(ui.get_selected_vm_network_badge(), "NAT · Internet Only");
+        ui.invoke_start_capture_action(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        assert!(ui.get_selected_capture_active());
+        assert!(ui.get_space_pills().row_data(0).unwrap().capturing);
+        ui.invoke_stop_capture_action(SharedString::from("10000000-0000-4000-8000-000000000001"));
+        assert!(!ui.get_selected_capture_active());
+        let cap_row = ui.get_selected_captures().row_data(0).unwrap();
+        ui.invoke_delete_capture_action(cap_row.vm_id, cap_row.capture_id);
+        assert_eq!(ui.get_selected_captures().row_count(), 0);
+
+        // Switch to stopped persistent Offline Vault -> snapshot save / restore / delete
+        let vault_id = SharedString::from("10000000-0000-4000-8000-000000000003");
+        ui.invoke_activate_space(vault_id.clone());
+        assert_eq!(ui.get_selected_snapshots().row_count(), 1);
+        ui.invoke_snapshot_vm_action(vault_id.clone());
+        assert_eq!(ui.get_selected_snapshots().row_count(), 2);
+        let snap_row = ui.get_selected_snapshots().row_data(0).unwrap();
+        assert!(snap_row.can_restore);
+        ui.invoke_confirm_restore_snapshot_action(
+            snap_row.vm_id.clone(),
+            snap_row.snapshot_id.clone(),
+        );
+        ui.invoke_delete_snapshot_action(snap_row.vm_id, snap_row.snapshot_id);
+        assert_eq!(ui.get_selected_snapshots().row_count(), 1);
 
         // Verify non-root / SO_PEERCRED / missing-daemon socket error propagates cleanly to shell banner
         struct FailingBridge;
@@ -823,13 +1129,41 @@ mod tests {
                 _: u32,
                 _: u32,
                 _: &str,
+                _: bool,
             ) -> Result<VmSummary, String> {
                 Err("disconnected".into())
             }
             fn start_vm(&mut self, _: &str) -> Result<VmSummary, String> {
                 Err("disconnected".into())
             }
+            fn stop_vm(&mut self, _: &str) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
             fn set_balloon_ram(&mut self, _: &str, _: u32) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
+            fn snapshot_vm(&mut self, _: &str) -> Result<SnapshotSummary, String> {
+                Err("disconnected".into())
+            }
+            fn list_snapshots(&mut self, _: &str) -> Result<Vec<SnapshotSummary>, String> {
+                Err("disconnected".into())
+            }
+            fn restore_snapshot(&mut self, _: &str, _: &str) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
+            fn delete_snapshot(&mut self, _: &str, _: &str) -> Result<(), String> {
+                Err("disconnected".into())
+            }
+            fn start_capture(&mut self, _: &str) -> Result<CaptureSummary, String> {
+                Err("disconnected".into())
+            }
+            fn stop_capture(&mut self, _: &str) -> Result<CaptureSummary, String> {
+                Err("disconnected".into())
+            }
+            fn list_captures(&mut self, _: &str) -> Result<Vec<CaptureSummary>, String> {
+                Err("disconnected".into())
+            }
+            fn delete_capture(&mut self, _: &str, _: &str) -> Result<(), String> {
                 Err("disconnected".into())
             }
         }
@@ -841,6 +1175,8 @@ mod tests {
             bridge: Box::new(FailingBridge),
             mock_mode: false,
             vms: Vec::new(),
+            snapshots: Vec::new(),
+            captures: Vec::new(),
             vmm_connected: true,
             vmm_error: None,
             sys: SystemStatus::read(true, None),

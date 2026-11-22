@@ -12,10 +12,13 @@ export struct VmItem {
     network-plain-label: string,
     display-mode-label: string,
     state: string,
-    ephemeral: bool,
+    disposable: bool,
     desired-min-ram-mib: int,
     accent: color,
     checkpoint-count: int,
+    capture-supported: bool,
+    capture-active: bool,
+    capture-status-label: string,
 }
 
 export struct CheckpointItem {
@@ -25,6 +28,18 @@ export struct CheckpointItem {
     vm-name: string,
     label: string,
     created-at: string,
+    vm-stopped: bool,
+}
+
+export struct CaptureItem {
+    capture-id: string,
+    short-capture-id: string,
+    vm-id: string,
+    vm-name: string,
+    started-at: string,
+    state: string,
+    bytes-label: string,
+    pcap-hint: string,
 }
 
 export struct TemplateItem {
@@ -111,9 +126,10 @@ export component MainWindow inherits Window {
     in property <string> zram-summary: "Unavailable";
     in property <string> zram-detail: "No /sys/block/zram0/mm_stat";
 
-    // Spaces & Visual Checkpoints
+    // Spaces, Visual Checkpoints & Packet Captures
     in property <[VmItem]> vms: [];
     in property <[CheckpointItem]> checkpoints: [];
+    in property <[CaptureItem]> captures: [];
     in property <string> status-message: "";
     in property <bool> status-is-error: false;
 
@@ -121,7 +137,14 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm-stop-visible: false;
     in-out property <string> confirm-stop-vm-id: "";
     in-out property <string> confirm-stop-vm-name: "";
-    in-out property <bool> confirm-stop-vm-ephemeral: false;
+    in-out property <bool> confirm-stop-vm-disposable: false;
+
+    // Snapshot restore confirmation modal (Contract v2: overwrites current/ disk)
+    in-out property <bool> confirm-restore-visible: false;
+    in-out property <string> confirm-restore-vm-id: "";
+    in-out property <string> confirm-restore-vm-name: "";
+    in-out property <string> confirm-restore-snap-id: "";
+    in-out property <string> confirm-restore-snap-label: "";
 
     // Plain-English Create Space Flow state
     in property <[TemplateItem]> templates: [];
@@ -132,9 +155,9 @@ export component MainWindow inherits Window {
     in-out property <int> wizard-min-ram-mib: 512;
     in-out property <int> wizard-vcpu-count: 2;
     in property <int> max-host-cpus: 4;
-    in-out property <int> wizard-network-mode: 0; // 0=Offline Vault, 1=Safe Web, 2=Home Network
+    in-out property <int> wizard-network-mode: 0; // 0=Isolated, 1=NAT Internet Only, 2=Host-Only
     in-out property <int> wizard-display-mode: 0; // 0=Seamless App Window, 1=Full Environment
-    in-out property <bool> wizard-ephemeral: false;
+    in-out property <bool> wizard-disposable: false;
 
     // Template Store state
     in property <[StoreCardItem]> store-cards: [];
@@ -158,7 +181,11 @@ export component MainWindow inherits Window {
     callback start-vm(string);
     callback pause-vm(string);
     callback snapshot-vm(string);
-    callback rewind-checkpoint(string, string);
+    callback confirm-restore-snapshot(string, string);
+    callback delete-snapshot(string, string);
+    callback start-capture(string);
+    callback stop-capture(string);
+    callback delete-capture(string, string);
     callback confirm-stop-vm(string);
     callback adjust-balloon-ram(string, int);
     callback change-network-mode(string, string);
@@ -442,29 +469,29 @@ export component MainWindow inherits Window {
                                         }
                                         PillBadge {
                                             text: vm.network-plain-label;
-                                            bg: #1e293b;
-                                            fg: #cbd5e1;
+                                            bg: vm.network-mode == "nat" ? #083344 : #1e293b;
+                                            fg: vm.network-mode == "nat" ? #67e8f9 : #cbd5e1;
                                         }
                                         PillBadge {
                                             text: vm.display-mode-label;
                                             bg: #172554;
                                             fg: #93c5fd;
                                         }
-                                        if vm.ephemeral : PillBadge {
-                                            text: "Self-Destruct";
+                                        if vm.disposable : PillBadge {
+                                            text: "DISPOSABLE";
                                             bg: #7c2d12;
                                             fg: #ffedd5;
                                         }
                                     }
 
                                     Text {
-                                        text: "Template: " + vm.base-image-id + "  •  " + vm.vcpu-count + " vCPU  •  Active RAM: " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB  •  Checkpoints: " + vm.checkpoint-count;
+                                        text: "Template: " + vm.base-image-id + "  •  " + vm.vcpu-count + " vCPU  •  Active RAM: " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB  •  Snapshots: " + (vm.disposable ? "Disabled" : vm.checkpoint-count);
                                         color: #94a3b8;
                                         font-size: 12px;
                                     }
                                 }
 
-                                // Primary Controls + Visual Checkpoint Save
+                                // Primary Controls + Snapshot Save
                                 HorizontalLayout {
                                     spacing: 6px;
                                     alignment: end;
@@ -481,8 +508,8 @@ export component MainWindow inherits Window {
                                         clicked => { root.pause-vm(vm.vm-id); }
                                     }
                                     Button {
-                                        text: "Save Checkpoint";
-                                        enabled: vm.state == "stopped";
+                                        text: "Save Snapshot";
+                                        enabled: vm.state == "stopped" && !vm.disposable;
                                         clicked => { root.snapshot-vm(vm.vm-id); }
                                     }
                                     Button {
@@ -491,14 +518,14 @@ export component MainWindow inherits Window {
                                         clicked => {
                                             root.confirm-stop-vm-id = vm.vm-id;
                                             root.confirm-stop-vm-name = vm.name;
-                                            root.confirm-stop-vm-ephemeral = vm.ephemeral;
+                                            root.confirm-stop-vm-disposable = vm.disposable;
                                             root.confirm-stop-visible = true;
                                         }
                                     }
                                 }
                             }
 
-                            // Secondary strip: live ballooning or stopped network switch
+                            // Secondary strip: ballooning / network switch + packet capture controls
                             HorizontalLayout {
                                 alignment: space-between;
                                 spacing: 8px;
@@ -530,36 +557,57 @@ export component MainWindow inherits Window {
                                 if vm.state == "stopped" : HorizontalLayout {
                                     spacing: 6px;
                                     Text {
-                                        text: "Change Network Access:";
+                                        text: "Network:";
                                         color: #94a3b8;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
                                     Button {
-                                        text: "Offline Vault";
+                                        text: "Isolated · Offline";
                                         enabled: vm.network-mode != "isolated";
                                         clicked => { root.change-network-mode(vm.vm-id, "isolated"); }
                                     }
                                     Button {
-                                        text: "Safe Web";
+                                        text: "NAT · Internet Only";
                                         enabled: vm.network-mode != "nat";
                                         clicked => { root.change-network-mode(vm.vm-id, "nat"); }
                                     }
                                     Button {
-                                        text: "Home Network";
+                                        text: "Host-Only · Local";
                                         enabled: vm.network-mode != "host-only";
                                         clicked => { root.change-network-mode(vm.vm-id, "host-only"); }
+                                    }
+                                }
+
+                                // Packet Capture status & Start/Stop trigger
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: end;
+
+                                    PillBadge {
+                                        text: vm.capture-status-label;
+                                        bg: vm.capture-active ? #065f46 : #1e293b;
+                                        fg: vm.capture-active ? #a7f3d0 : #94a3b8;
+                                    }
+                                    if vm.capture-active : Button {
+                                        text: "■ Stop Capture";
+                                        clicked => { root.stop-capture(vm.vm-id); }
+                                    }
+                                    if !vm.capture-active : Button {
+                                        text: "● Start Capture";
+                                        enabled: vm.state == "running" && vm.capture-supported;
+                                        clicked => { root.start-capture(vm.vm-id); }
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Visual Checkpoints (Save & Rewind Cards)
+                    // Saved Snapshots (List / Restore with data-loss modal / Delete)
                     if root.checkpoints.length > 0 : VerticalLayout {
                         spacing: 8px;
                         Text {
-                            text: "Saved Checkpoints (" + root.checkpoints.length + ")";
+                            text: "Saved Snapshots (" + root.checkpoints.length + ")";
                             color: #f8fafc;
                             font-size: 14px;
                             font-weight: 700;
@@ -585,15 +633,88 @@ export component MainWindow inherits Window {
                                         font-weight: 700;
                                     }
                                     Text {
-                                        text: "Saved at " + cp.created-at + "  •  Btrfs read-only snapshot " + cp.short-snap-id;
+                                        text: "Created " + cp.created-at + "  •  Read-only Btrfs snapshot " + cp.short-snap-id + (cp.vm-stopped ? "" : "  •  Stop VM to restore");
+                                        color: #94a3b8;
+                                        font-size: 11px;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Button {
+                                        text: "↺ Restore";
+                                        enabled: cp.vm-stopped;
+                                        clicked => {
+                                            root.confirm-restore-vm-id = cp.vm-id;
+                                            root.confirm-restore-vm-name = cp.vm-name;
+                                            root.confirm-restore-snap-id = cp.snapshot-id;
+                                            root.confirm-restore-snap-label = cp.label;
+                                            root.confirm-restore-visible = true;
+                                        }
+                                    }
+                                    Button {
+                                        text: "Delete";
+                                        clicked => { root.delete-snapshot(cp.vm-id, cp.snapshot-id); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Packet Captures (List & Delete)
+                    if root.captures.length > 0 : VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Packet Captures (" + root.captures.length + ")";
+                            color: #f8fafc;
+                            font-size: 14px;
+                            font-weight: 700;
+                        }
+
+                        for cap in root.captures : Rectangle {
+                            border-radius: 8px;
+                            background: #162033;
+                            border-width: 1px;
+                            border-color: cap.state == "running" ? #10b981 : cap.state == "limit_reached" ? #f59e0b : #243247;
+
+                            HorizontalLayout {
+                                padding: 12px;
+                                alignment: space-between;
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: cap.vm-name + " — Capture " + cap.short-capture-id;
+                                            color: #f8fafc;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                        PillBadge {
+                                            text: cap.state;
+                                            bg: cap.state == "running" ? #065f46 : cap.state == "limit_reached" ? #78350f : #1e293b;
+                                            fg: #f8fafc;
+                                        }
+                                        PillBadge {
+                                            text: cap.bytes-label;
+                                            bg: #0f2942;
+                                            fg: #7dd3fc;
+                                        }
+                                    }
+                                    Text {
+                                        text: "Started " + cap.started-at + "  •  " + cap.pcap-hint;
                                         color: #94a3b8;
                                         font-size: 11px;
                                     }
                                 }
 
                                 Button {
-                                    text: "↺ Rewind";
-                                    clicked => { root.rewind-checkpoint(cp.vm-id, cp.snapshot-id); }
+                                    text: "Delete";
+                                    enabled: cap.state != "running";
+                                    clicked => { root.delete-capture(cap.vm-id, cap.capture-id); }
                                 }
                             }
                         }
@@ -691,7 +812,7 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                // Safe Web (nat)
+                                // NAT (Internet Only)
                                 Rectangle {
                                     horizontal-stretch: 1;
                                     border-radius: 8px;
@@ -702,8 +823,8 @@ export component MainWindow inherits Window {
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 4px;
-                                        Text { text: "Safe Web"; color: #67e8f9; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Outbound internet only. Blocked from host and other Spaces."; color: #cbd5e1; font-size: 11px; wrap: word-wrap; }
+                                        Text { text: "NAT · Internet Only"; color: #67e8f9; font-size: 13px; font-weight: 700; }
+                                        Text { text: "Public internet only. Local LAN, host, and other Spaces are blocked."; color: #cbd5e1; font-size: 11px; wrap: word-wrap; }
                                     }
                                 }
 
@@ -853,17 +974,17 @@ export component MainWindow inherits Window {
                                 border-radius: 8px;
                                 background: #0b1120;
                                 border-width: 1px;
-                                border-color: root.wizard-ephemeral ? #ea580c : #243247;
+                                border-color: root.wizard-disposable ? #ea580c : #243247;
                                 VerticalLayout {
                                     padding: 12px;
                                     spacing: 6px;
                                     Text { text: "6. Lifecycle Safety"; color: #e2e8f0; font-size: 12px; font-weight: 700; }
                                     CheckBox {
-                                        text: "Self-Destruct on Close";
-                                        checked <=> root.wizard-ephemeral;
+                                        text: "Disposable (reset disk on stop)";
+                                        checked <=> root.wizard-disposable;
                                     }
                                     Text {
-                                        text: "Wipes this Space's temporary CoW overlay the moment you close it — great for untrusted links.";
+                                        text: "Writable CoW disk resets to its base on every stop or crash; snapshots are disabled for this Space.";
                                         color: #94a3b8;
                                         font-size: 11px;
                                         wrap: word-wrap;
@@ -1136,8 +1257,8 @@ export component MainWindow inherits Window {
                     font-size: 13px;
                     wrap: word-wrap;
                 }
-                if root.confirm-stop-vm-ephemeral : Text {
-                    text: "Self-Destruct on Close is active — this Space's temporary CoW disk layer will be wiped.";
+                if root.confirm-stop-vm-disposable : Text {
+                    text: "Disposable mode is enabled — this Space's writable CoW disk will be permanently reset on stop.";
                     color: #fdba74;
                     font-size: 12px;
                     wrap: word-wrap;
@@ -1152,6 +1273,52 @@ export component MainWindow inherits Window {
                         clicked => {
                             root.confirm-stop-visible = false;
                             root.confirm-stop-vm(root.confirm-stop-vm-id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ================= SNAPSHOT RESTORE DATA-LOSS CONFIRMATION MODAL =================
+    if root.confirm-restore-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: #020617cc;
+
+        TouchArea {}
+
+        Rectangle {
+            width: 490px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #111827;
+            border-width: 1px;
+            border-color: #f59e0b;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text { text: "Restore Snapshot Warning"; color: #fcd34d; font-size: 16px; font-weight: 700; }
+                Text {
+                    text: "Restoring " + root.confirm-restore-snap-label + " on \"" + root.confirm-restore-vm-name + "\" swaps its current disk atomically. Any disk changes made since this snapshot will be permanently lost.";
+                    color: #e2e8f0;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    Button { text: "Cancel"; clicked => { root.confirm-restore-visible = false; } }
+                    Button {
+                        text: "Restore Snapshot";
+                        primary: true;
+                        clicked => {
+                            root.confirm-restore-visible = false;
+                            root.confirm-restore-snapshot(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
                         }
                     }
                 }

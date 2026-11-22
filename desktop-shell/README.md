@@ -5,17 +5,17 @@ An original, ultra-low-RAM Wayland desktop shell built in Rust with **Smithay 0.
 ## Design Highlights (Workspace-First, Not a macOS/Windows Clone)
 
 - **Top Context Rail (replaces docks & menu bars):**
-  - Pill-shaped Space tabs for active VMs showing color-coded origin dots and live RAM usage.
+  - Pill-shaped Space tabs for active VMs showing color-coded origin dots, network badges (`NAT · Internet Only`, `Isolated · Offline`, `Host-Only · Local`), `DISP` badges on disposable VMs, `● REC` indicators during packet capture, and live RAM usage.
   - `+ New Space` quick-launch trigger.
   - Compact Host + ZRAM memory meter, Wi-Fi, Audio, and Battery status indicators.
   - One-click **`Reclaim RAM`** button that deflates idle VM `virtio-balloon` targets via `set_balloon_ram` over `/run/hyperos/vmm.sock`.
 - **Origin-Aware Smithay Wayland Compositor (`src/compositor.rs`, `src/origin.rs`, `src/layout.rs`):**
-  - Every window displays a **2px colored border** and a subtle **top-left origin badge pill** indicating whether it belongs to the **Host** or a specific VM Space (e.g., Cyan for *Disposable Browser*, Emerald for *Work Pod*, Amber for *Offline Vault*).
+  - Every window displays a **2px colored border** and a subtle **top-left origin badge pill** indicating whether it belongs to the **Host** or a specific VM Space (explicitly marking NAT windows as `NAT · Internet Only` and disposable windows as `Disposable`).
   - **Magnetic half & quarter screen snapping** (28px edge/corner attraction zones + one-click/shortcut snap targets) with **smooth 180 ms ease-out cubic window transitions**.
 - **`Super`-Key Action Deck (`src/action_deck.rs`, `ui/shell.slint`):**
   - Instant search across apps, active Spaces, and presets.
-  - One-click instant environment launchers (**Disposable Browser**, **Work Pod**, **Offline Vault**).
-  - Quick hardware toggles (Wi-Fi, Audio Mute, Display Scaling, Global Offline Shield).
+  - One-click instant environment launchers (**Disposable Browser**, **Work Pod**, **Offline Vault**) plus a **Disposable (reset disk on stop)** toggle.
+  - Active Space controls for **Packet Capture** (`start_capture` / `stop_capture` / `delete_capture` with live byte readout) and **Snapshots** (`snapshot_vm`, `restore_snapshot` with mandatory data-loss confirmation modal, `delete_snapshot`), plus `stop_vm` hard power-off warning modal.
 - **Bare-Metal DRM/KMS + libinput Backend (`src/kms.rs`, `src/framebuffer.rs`):**
   - Double-buffered `XRGB8888` DRM dumb buffers (`set_crtc` + `page_flip` with `simpledrm` fallback), software arrow cursor overlay, `libseat` VT switching (`Ctrl+Alt+F1..F12`), and `Super` key handling without Mesa/GBM/EGL/X11.
 

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 pub const DEFAULT_VMM_SOCKET: &str = "/run/hyperos/vmm.sock";
 pub const MAX_FRAME_BYTES: usize = 65_536;
+pub const CAPTURE_MAX_BYTES: u64 = 256 * 1_048_576;
 
 /// Produce a clear, actionable message when `UnixStream::connect` fails.
 pub fn classify_connect_error(socket_path: &Path, err: &io::Error) -> String {
@@ -96,7 +97,7 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, socket_path: &Path) -> Result<
     }
 }
 
-/// Exact `ARCHITECTURE.md` VM wire schema (8 required fields, no unknown keys).
+/// Exact `ARCHITECTURE.md` Contract v2 VM wire schema (9 required fields, no unknown keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmSummary {
@@ -108,6 +109,48 @@ pub struct VmSummary {
     pub balloon_target_mib: u32,
     pub network_mode: String,
     pub state: String,
+    pub disposable: bool,
+}
+
+/// Exact `ARCHITECTURE.md` Snapshot wire schema (3 required fields, no unknown keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotSummary {
+    pub snapshot_id: String,
+    pub vm_id: String,
+    pub created_at: String,
+}
+
+/// Exact `ARCHITECTURE.md` Contract v2 Capture wire schema (5 required fields, no unknown keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSummary {
+    pub capture_id: String,
+    pub vm_id: String,
+    pub started_at: String,
+    pub state: String,
+    pub bytes: u64,
+}
+
+/// Format capture byte counter in human-readable IEC units.
+pub fn format_capture_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1_048_576 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+    }
+}
+
+/// Plain-English network badge making explicit that `nat` is internet-only (LAN blocked).
+pub fn network_badge_label(mode: &str) -> &'static str {
+    match mode {
+        "nat" => "NAT · Internet Only",
+        "isolated" => "Isolated · Offline",
+        "host-only" => "Host-Only · Local",
+        _ => "Unknown",
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +158,22 @@ pub struct VmSummary {
 struct ListVmsResult {
     vms: Vec<VmSummary>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListSnapshotsResult {
+    snapshots: Vec<SnapshotSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListCapturesResult {
+    captures: Vec<CaptureSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyResult {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,9 +221,9 @@ impl EnvironmentPreset {
 
     pub fn subtitle(self) -> &'static str {
         match self {
-            Self::DisposableBrowser => "Safe Web · Self-destructs when closed",
-            Self::WorkPod => "Safe Web · Everyday apps & documents",
-            Self::OfflineVault => "Zero Network · Air-gapped private files",
+            Self::DisposableBrowser => "NAT · Internet Only · Resets disk on close",
+            Self::WorkPod => "NAT · Internet Only · Daily apps & snapshots",
+            Self::OfflineVault => "Isolated · Offline · Air-gapped private files",
         }
     }
 
@@ -208,7 +267,7 @@ impl EnvironmentPreset {
         }
     }
 
-    pub fn is_ephemeral(self) -> bool {
+    pub fn is_disposable(self) -> bool {
         matches!(self, Self::DisposableBrowser)
     }
 
@@ -238,9 +297,20 @@ pub trait ShellVmmBridge {
         vcpu_count: u32,
         ram_mib: u32,
         network_mode: &str,
+        disposable: bool,
     ) -> Result<VmSummary, String>;
     fn start_vm(&mut self, vm_id: &str) -> Result<VmSummary, String>;
+    fn stop_vm(&mut self, vm_id: &str) -> Result<VmSummary, String>;
     fn set_balloon_ram(&mut self, vm_id: &str, ram_mib: u32) -> Result<VmSummary, String>;
+    fn snapshot_vm(&mut self, vm_id: &str) -> Result<SnapshotSummary, String>;
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<SnapshotSummary>, String>;
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<VmSummary, String>;
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), String>;
+    fn start_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String>;
+    fn stop_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String>;
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<CaptureSummary>, String>;
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), String>;
+    fn tick_mock_captures(&mut self) {}
 }
 
 /// Deflate balloons of running VMs (skipping the currently focused VM if desired)
@@ -283,13 +353,16 @@ pub fn reclaim_idle_ram(
 pub fn launch_environment_preset(
     bridge: &mut dyn ShellVmmBridge,
     preset: EnvironmentPreset,
+    disposable_override: Option<bool>,
 ) -> Result<VmSummary, String> {
+    let disposable = disposable_override.unwrap_or_else(|| preset.is_disposable());
     let created = bridge.create_vm(
         preset.title(),
         preset.base_image_id(),
         preset.vcpu_count(),
         preset.max_ram_mib(),
         preset.network_mode(),
+        disposable,
     )?;
     bridge.start_vm(&created.vm_id)
 }
@@ -379,6 +452,7 @@ impl ShellVmmBridge for UnixVmmBridge {
         vcpu_count: u32,
         ram_mib: u32,
         network_mode: &str,
+        disposable: bool,
     ) -> Result<VmSummary, String> {
         self.call(
             "create_vm",
@@ -388,6 +462,7 @@ impl ShellVmmBridge for UnixVmmBridge {
                 "vcpu_count": vcpu_count,
                 "ram_mib": ram_mib,
                 "network_mode": network_mode,
+                "disposable": disposable,
             }),
         )
     }
@@ -396,17 +471,70 @@ impl ShellVmmBridge for UnixVmmBridge {
         self.call("start_vm", serde_json::json!({ "vm_id": vm_id }))
     }
 
+    fn stop_vm(&mut self, vm_id: &str) -> Result<VmSummary, String> {
+        self.call("stop_vm", serde_json::json!({ "vm_id": vm_id }))
+    }
+
     fn set_balloon_ram(&mut self, vm_id: &str, ram_mib: u32) -> Result<VmSummary, String> {
         self.call(
             "set_balloon_ram",
             serde_json::json!({ "vm_id": vm_id, "ram_mib": ram_mib }),
         )
     }
+
+    fn snapshot_vm(&mut self, vm_id: &str) -> Result<SnapshotSummary, String> {
+        self.call("snapshot_vm", serde_json::json!({ "vm_id": vm_id }))
+    }
+
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<SnapshotSummary>, String> {
+        let res: ListSnapshotsResult =
+            self.call("list_snapshots", serde_json::json!({ "vm_id": vm_id }))?;
+        Ok(res.snapshots)
+    }
+
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<VmSummary, String> {
+        self.call(
+            "restore_snapshot",
+            serde_json::json!({ "vm_id": vm_id, "snapshot_id": snapshot_id }),
+        )
+    }
+
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), String> {
+        let _: EmptyResult = self.call(
+            "delete_snapshot",
+            serde_json::json!({ "vm_id": vm_id, "snapshot_id": snapshot_id }),
+        )?;
+        Ok(())
+    }
+
+    fn start_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String> {
+        self.call("start_capture", serde_json::json!({ "vm_id": vm_id }))
+    }
+
+    fn stop_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String> {
+        self.call("stop_capture", serde_json::json!({ "vm_id": vm_id }))
+    }
+
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<CaptureSummary>, String> {
+        let res: ListCapturesResult =
+            self.call("list_captures", serde_json::json!({ "vm_id": vm_id }))?;
+        Ok(res.captures)
+    }
+
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), String> {
+        let _: EmptyResult = self.call(
+            "delete_capture",
+            serde_json::json!({ "vm_id": vm_id, "capture_id": capture_id }),
+        )?;
+        Ok(())
+    }
 }
 
 /// In-memory `--mock` VMM bridge pre-populated with realistic HyperOS Spaces.
 pub struct MockShellVmmBridge {
     vms: BTreeMap<String, VmSummary>,
+    snapshots: Vec<SnapshotSummary>,
+    captures: Vec<CaptureSummary>,
 }
 
 impl MockShellVmmBridge {
@@ -422,6 +550,7 @@ impl MockShellVmmBridge {
                 balloon_target_mib: 1024,
                 network_mode: "nat".into(),
                 state: "running".into(),
+                disposable: false,
             },
             VmSummary {
                 vm_id: "10000000-0000-4000-8000-000000000002".into(),
@@ -432,6 +561,7 @@ impl MockShellVmmBridge {
                 balloon_target_mib: 768,
                 network_mode: "nat".into(),
                 state: "running".into(),
+                disposable: true,
             },
             VmSummary {
                 vm_id: "10000000-0000-4000-8000-000000000003".into(),
@@ -441,13 +571,30 @@ impl MockShellVmmBridge {
                 ram_mib: 512,
                 balloon_target_mib: 384,
                 network_mode: "isolated".into(),
-                state: "running".into(),
+                state: "stopped".into(),
+                disposable: false,
             },
         ];
         for vm in samples {
             vms.insert(vm.vm_id.clone(), vm);
         }
-        Self { vms }
+        let snapshots = vec![SnapshotSummary {
+            snapshot_id: "5c102e90-8c4a-4b11-9222-104088ab1003".into(),
+            vm_id: "10000000-0000-4000-8000-000000000003".into(),
+            created_at: "2026-11-22T09:30:00Z".into(),
+        }];
+        let captures = vec![CaptureSummary {
+            capture_id: "0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e02".into(),
+            vm_id: "10000000-0000-4000-8000-000000000002".into(),
+            started_at: "2026-11-22T10:00:00Z".into(),
+            state: "stopped".into(),
+            bytes: 32_768,
+        }];
+        Self {
+            vms,
+            snapshots,
+            captures,
+        }
     }
 }
 
@@ -463,6 +610,7 @@ impl ShellVmmBridge for MockShellVmmBridge {
         vcpu_count: u32,
         ram_mib: u32,
         network_mode: &str,
+        disposable: bool,
     ) -> Result<VmSummary, String> {
         let vm_id = uuid::Uuid::new_v4().hyphenated().to_string();
         let vm = VmSummary {
@@ -474,6 +622,7 @@ impl ShellVmmBridge for MockShellVmmBridge {
             balloon_target_mib: ram_mib,
             network_mode: network_mode.to_string(),
             state: "stopped".to_string(),
+            disposable,
         };
         self.vms.insert(vm_id, vm.clone());
         Ok(vm)
@@ -486,6 +635,20 @@ impl ShellVmmBridge for MockShellVmmBridge {
             .ok_or_else(|| "VM not found".to_string())?;
         vm.state = "running".to_string();
         vm.balloon_target_mib = vm.ram_mib;
+        Ok(vm.clone())
+    }
+
+    fn stop_vm(&mut self, vm_id: &str) -> Result<VmSummary, String> {
+        let vm = self
+            .vms
+            .get_mut(vm_id)
+            .ok_or_else(|| "VM not found".to_string())?;
+        vm.state = "stopped".to_string();
+        for cap in &mut self.captures {
+            if cap.vm_id == vm_id && cap.state == "running" {
+                cap.state = "stopped".to_string();
+            }
+        }
         Ok(vm.clone())
     }
 
@@ -502,6 +665,180 @@ impl ShellVmmBridge for MockShellVmmBridge {
         }
         vm.balloon_target_mib = ram_mib;
         Ok(vm.clone())
+    }
+
+    fn snapshot_vm(&mut self, vm_id: &str) -> Result<SnapshotSummary, String> {
+        let vm = self
+            .vms
+            .get(vm_id)
+            .ok_or_else(|| "VM not found".to_string())?;
+        if vm.disposable {
+            return Err("RPC -32002: snapshot_vm is disallowed on disposable VMs".to_string());
+        }
+        if vm.state != "stopped" {
+            return Err("RPC -32002: snapshot_vm requires a stopped VM".to_string());
+        }
+        let snap = SnapshotSummary {
+            snapshot_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            vm_id: vm.vm_id.clone(),
+            created_at: "2026-11-22T12:00:00Z".to_string(),
+        };
+        self.snapshots.push(snap.clone());
+        Ok(snap)
+    }
+
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<SnapshotSummary>, String> {
+        if !self.vms.contains_key(vm_id) {
+            return Err("RPC -32001: VM not found".to_string());
+        }
+        let mut list: Vec<SnapshotSummary> = self
+            .snapshots
+            .iter()
+            .filter(|s| s.vm_id == vm_id)
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.snapshot_id.cmp(&b.snapshot_id))
+        });
+        Ok(list)
+    }
+
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<VmSummary, String> {
+        let vm = self
+            .vms
+            .get(vm_id)
+            .cloned()
+            .ok_or_else(|| "RPC -32001: VM not found".to_string())?;
+        if vm.disposable {
+            return Err("RPC -32002: restore_snapshot is disallowed on disposable VMs".to_string());
+        }
+        if !self
+            .snapshots
+            .iter()
+            .any(|s| s.vm_id == vm_id && s.snapshot_id == snapshot_id)
+        {
+            return Err("RPC -32001: snapshot not found".to_string());
+        }
+        if vm.state != "stopped" {
+            return Err("RPC -32002: restore_snapshot requires a stopped VM".to_string());
+        }
+        Ok(vm)
+    }
+
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), String> {
+        if !self.vms.contains_key(vm_id) {
+            return Err("RPC -32001: VM not found".to_string());
+        }
+        let before = self.snapshots.len();
+        self.snapshots
+            .retain(|s| !(s.vm_id == vm_id && s.snapshot_id == snapshot_id));
+        if self.snapshots.len() == before {
+            return Err("RPC -32001: snapshot not found".to_string());
+        }
+        Ok(())
+    }
+
+    fn start_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String> {
+        let vm = self
+            .vms
+            .get(vm_id)
+            .ok_or_else(|| "RPC -32001: VM not found".to_string())?;
+        if vm.state != "running" {
+            return Err("RPC -32002: start_capture requires a running VM".to_string());
+        }
+        if vm.network_mode == "isolated" {
+            return Err("RPC -32004: start_capture unavailable for isolated VM".to_string());
+        }
+        if self
+            .captures
+            .iter()
+            .any(|c| c.vm_id == vm_id && c.state == "running")
+        {
+            return Err("RPC -32002: capture already running".to_string());
+        }
+        let cap = CaptureSummary {
+            capture_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            vm_id: vm.vm_id.clone(),
+            started_at: "2026-11-22T12:00:00Z".to_string(),
+            state: "running".to_string(),
+            bytes: 0,
+        };
+        self.captures.push(cap.clone());
+        Ok(cap)
+    }
+
+    fn stop_capture(&mut self, vm_id: &str) -> Result<CaptureSummary, String> {
+        if !self.vms.contains_key(vm_id) {
+            return Err("RPC -32001: VM not found".to_string());
+        }
+        if let Some(active) = self
+            .captures
+            .iter_mut()
+            .find(|c| c.vm_id == vm_id && c.state == "running")
+        {
+            active.state = "stopped".to_string();
+            return Ok(active.clone());
+        }
+        self.captures
+            .iter()
+            .filter(|c| c.vm_id == vm_id)
+            .max_by(|a, b| {
+                a.started_at
+                    .cmp(&b.started_at)
+                    .then_with(|| a.capture_id.cmp(&b.capture_id))
+            })
+            .cloned()
+            .ok_or_else(|| "RPC -32001: no capture exists for VM".to_string())
+    }
+
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<CaptureSummary>, String> {
+        if !self.vms.contains_key(vm_id) {
+            return Err("RPC -32001: VM not found".to_string());
+        }
+        let mut list: Vec<CaptureSummary> = self
+            .captures
+            .iter()
+            .filter(|c| c.vm_id == vm_id)
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.capture_id.cmp(&b.capture_id))
+        });
+        Ok(list)
+    }
+
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), String> {
+        if !self.vms.contains_key(vm_id) {
+            return Err("RPC -32001: VM not found".to_string());
+        }
+        let Some(pos) = self
+            .captures
+            .iter()
+            .position(|c| c.vm_id == vm_id && c.capture_id == capture_id)
+        else {
+            return Err("RPC -32001: capture not found".to_string());
+        };
+        if self.captures[pos].state == "running" {
+            return Err("RPC -32002: cannot delete a running capture; stop it first".to_string());
+        }
+        self.captures.remove(pos);
+        Ok(())
+    }
+
+    fn tick_mock_captures(&mut self) {
+        for cap in &mut self.captures {
+            if cap.state == "running" {
+                let next = cap.bytes.saturating_add(4096).min(CAPTURE_MAX_BYTES);
+                cap.bytes = next;
+                if next >= CAPTURE_MAX_BYTES {
+                    cap.state = "limit_reached".to_string();
+                }
+            }
+        }
     }
 }
 
@@ -592,20 +929,130 @@ mod tests {
         let mut bridge = MockShellVmmBridge::with_sample_spaces();
         let focused = "10000000-0000-4000-8000-000000000001";
         let report = reclaim_idle_ram(&mut bridge, Some(focused)).unwrap();
-        // Work Pod (focused): 1024 -> 896 (128 reclaimed)
-        // Disposable Browser: 768 -> 256 (512 reclaimed)
-        // Offline Vault: 384 -> 256 (128 reclaimed)
-        assert_eq!(report.deflated_vms, 3);
-        assert_eq!(report.reclaimed_mib, 768);
+        // Work Pod (focused, running): 1024 -> 896 (128 reclaimed)
+        // Disposable Browser (running): 768 -> 256 (512 reclaimed)
+        // Offline Vault starts stopped so snapshots are immediately testable.
+        assert_eq!(report.deflated_vms, 2);
+        assert_eq!(report.reclaimed_mib, 640);
     }
 
     #[test]
-    fn one_click_preset_creates_and_starts_space() {
+    fn one_click_preset_creates_and_starts_space_and_respects_disposable_override() {
         let mut bridge = MockShellVmmBridge::with_sample_spaces();
-        let vm = launch_environment_preset(&mut bridge, EnvironmentPreset::OfflineVault).unwrap();
+        let vm =
+            launch_environment_preset(&mut bridge, EnvironmentPreset::OfflineVault, Some(true))
+                .unwrap();
         assert_eq!(vm.name, "Offline Vault");
         assert_eq!(vm.network_mode, "isolated");
         assert_eq!(vm.state, "running");
+        assert!(vm.disposable);
         assert_eq!(bridge.list_vms().unwrap().len(), 4);
+
+        let browser =
+            launch_environment_preset(&mut bridge, EnvironmentPreset::DisposableBrowser, None)
+                .unwrap();
+        assert!(browser.disposable);
+    }
+
+    #[test]
+    fn unix_vmm_bridge_serializes_contract_v2_disposable_snapshot_and_capture_rpcs() {
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-shell-v2-{}.sock", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let vm_id = "10000000-0000-4000-8000-000000000099";
+        let snap_id = "5c102e90-8c4a-4b11-9222-104088ab1099";
+        let cap_id = "0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e99";
+
+        let server = thread::spawn(move || {
+            for _ in 0..8 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut w = stream.try_clone().unwrap();
+                let mut r = BufReader::new(stream);
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let id = req["id"].as_str().unwrap();
+                let method = req["method"].as_str().unwrap();
+                let result = match method {
+                    "create_vm" => {
+                        assert_eq!(req["params"]["disposable"], serde_json::json!(true));
+                        serde_json::json!({
+                            "vm_id": vm_id,
+                            "name": "Web",
+                            "base_image_id": "alpine-3-21-virtio",
+                            "vcpu_count": 2,
+                            "ram_mib": 1024,
+                            "balloon_target_mib": 1024,
+                            "network_mode": "nat",
+                            "state": "stopped",
+                            "disposable": true
+                        })
+                    }
+                    "list_snapshots" => serde_json::json!({
+                        "snapshots": [{"snapshot_id": snap_id, "vm_id": vm_id, "created_at": "2026-11-22T00:00:00Z"}]
+                    }),
+                    "restore_snapshot" => {
+                        assert_eq!(req["params"]["snapshot_id"], serde_json::json!(snap_id));
+                        serde_json::json!({
+                            "vm_id": vm_id,
+                            "name": "Web",
+                            "base_image_id": "alpine-3-21-virtio",
+                            "vcpu_count": 2,
+                            "ram_mib": 1024,
+                            "balloon_target_mib": 1024,
+                            "network_mode": "nat",
+                            "state": "stopped",
+                            "disposable": false
+                        })
+                    }
+                    "delete_snapshot" => serde_json::json!({}),
+                    "start_capture" | "stop_capture" => serde_json::json!({
+                        "capture_id": cap_id,
+                        "vm_id": vm_id,
+                        "started_at": "2026-11-22T00:00:00Z",
+                        "state": if method == "start_capture" { "running" } else { "stopped" },
+                        "bytes": 4096
+                    }),
+                    "list_captures" => serde_json::json!({
+                        "captures": [{
+                            "capture_id": cap_id,
+                            "vm_id": vm_id,
+                            "started_at": "2026-11-22T00:00:00Z",
+                            "state": "stopped",
+                            "bytes": 4096
+                        }]
+                    }),
+                    "delete_capture" => serde_json::json!({}),
+                    other => panic!("unexpected method: {other}"),
+                };
+                let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                let mut frame = serde_json::to_vec(&resp).unwrap();
+                frame.push(b'\n');
+                w.write_all(&frame).unwrap();
+                w.flush().unwrap();
+            }
+        });
+
+        let mut bridge = UnixVmmBridge::new(&sock_path);
+        let created = bridge
+            .create_vm("Web", "alpine-3-21-virtio", 2, 1024, "nat", true)
+            .unwrap();
+        assert!(created.disposable);
+        assert_eq!(bridge.list_snapshots(vm_id).unwrap().len(), 1);
+        assert!(!bridge.restore_snapshot(vm_id, snap_id).unwrap().disposable);
+        bridge.delete_snapshot(vm_id, snap_id).unwrap();
+        assert_eq!(bridge.start_capture(vm_id).unwrap().state, "running");
+        assert_eq!(bridge.stop_capture(vm_id).unwrap().state, "stopped");
+        assert_eq!(bridge.list_captures(vm_id).unwrap()[0].bytes, 4096);
+        bridge.delete_capture(vm_id, cap_id).unwrap();
+
+        // Missing disposable field in VmSummary must fail strict deserialization
+        let missing_disp = r#"{"vm_id":"1","name":"x","base_image_id":"a","vcpu_count":1,"ram_mib":512,"balloon_target_mib":512,"network_mode":"nat","state":"stopped"}"#;
+        assert!(serde_json::from_str::<VmSummary>(missing_disp).is_err());
+
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
     }
 }

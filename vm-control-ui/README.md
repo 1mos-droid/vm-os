@@ -6,11 +6,11 @@ Communicates with `vmm-daemon` over `/run/hyperos/vmm.sock` using the exact JSON
 
 ## Four Zero-Script Views
 
-1. **Spaces (Dashboard + Visual Checkpoints):**
+1. **Spaces (Dashboard, Snapshots & Packet Captures):**
    - Live Host Memory (`/proc/meminfo`) and ZRAM (`/sys/block/zram0/mm_stat`) gauges + one-click **`Reclaim RAM`** button (deflates idle VM balloons via `set_balloon_ram`).
-   - Color-coded Space cards with plain-English Network & Display badges, one-click Open/Pause/Close (with mandatory hard power-off data-loss confirmation modal), and **Visual Checkpoints** (`Save Checkpoint` wired to `snapshot_vm` + `Rewind` checkpoint cards).
+   - Color-coded Space cards with `NAT · Internet Only` / `Isolated · Offline` / `Host-Only · Local` network badges, explicit `DISPOSABLE` badges, one-click Open/Pause/Close (with mandatory hard power-off data-loss confirmation modal), per-VM **Packet Capture** start/stop controls + live status (`running` / `stopped` / `limit_reached`, byte size) and capture list with `Delete`, plus **Saved Snapshots** (`list_snapshots`, `snapshot_vm`, `restore_snapshot` with mandatory data-loss warning modal, and `delete_snapshot`).
 2. **Create Space (Plain-English Flow):**
-   - Visual selectors for **Network Access** (*Offline Vault* = `isolated`, *Safe Web* = `nat`, *Home Network* = `host-only`), **Memory Profile** (*Light* / *Standard* / *Heavy* mapped to `virtio-balloon`), **Display Mode** (*Seamless App Window* vs *Full Environment*), and **Self-Destruct on Close** toggle — wired strictly to `ARCHITECTURE.md`'s `create_vm` RPC.
+   - Visual selectors for **Network Access** (*Isolated · Offline* = `isolated`, *NAT · Internet Only* = `nat`, *Host-Only · Local* = `host-only`), **Memory Profile** (*Light* / *Standard* / *Heavy* mapped to `virtio-balloon`), **Display Mode** (*Seamless App Window* vs *Full Environment*), and **Disposable (reset disk on stop)** checkbox — wired directly to Contract v2 `create_vm.disposable`.
 3. **Template Store:**
    - Curated guest template cards with one-click download & SHA-256 verification progress bars and instant handoff to Create Space.
 4. **Guided Settings:**
