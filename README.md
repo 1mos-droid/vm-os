@@ -9,7 +9,7 @@ HyperOS is a minimal, security-focused `x86_64` virtualization host OS built to 
 - **Host Idle RAM Acceptance Target:** `< 350 MiB` used RAM (`MemTotal - MemAvailable`) before any VM starts (measured on a booted target image — publish headless and `desktop-shell` measurements from real runs before treating this target as a benchmark claim).
 - **Memory & Storage Efficiency:** `zstd` ZRAM swap (`/dev/zram0`, 65% of `MemTotal`, priority 100), `virtio-balloon` dynamic memory control, strict `MemTotal - 768 MiB` RAM admission control, and zero-overhead Btrfs copy-on-write (`cp --reflink=always` / `FICLONE`) VM disks with cold read-only subvolume snapshots.
 - **v1 Hardware Profile:** Built-in monolithic Linux `6.12.20` drivers for QEMU/KVM (`virtio-*`), USB 3.0 UAS, NVMe, AHCI, I2C HID touchpads, and Intel (`i915`), AMD (`amdgpu`), and `simpledrm` displays. Wireless (`WLAN`) and local ALSA `SOUND` are intentionally disabled in the v1 monolithic kernel profile; `desktop-shell` and `vm-control-ui` probe real sysfs/procfs capabilities and mark Wi-Fi/Audio unavailable when absent.
-- **KSM:** the kernel has `CONFIG_KSM` and `/etc/sv/ksm/run` sets `run=1`, but guest memory is not marked `MADV_MERGEABLE`, so nothing is merged today. Cross-VM page sharing is a side channel; it is planned to default off.
+- **KSM off:** the kernel has `CONFIG_KSM`, but `/etc/sv/ksm/run` sets `run=0` and guest memory is never marked `MADV_MERGEABLE`, because cross-VM page sharing is a side channel.
 - **Contract-Driven Integration:** Every Unix socket path, JSON-RPC 2.0 schema, error code, and storage path is specified verbatim in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 > **Warning before writing `hyperos.img` to a drive:** Flashing `hyperos.img` overwrites the target drive's partition table, and booting **Persistent Mode** automatically expands Partition 3 (`HYPEROS_DATA`) into any unallocated space behind it on first boot. Use a dedicated USB pendrive, internal drive, or scratch disk image.
@@ -18,10 +18,9 @@ HyperOS is a minimal, security-focused `x86_64` virtualization host OS built to 
 
 HyperOS is a working virtualization host foundation, not yet a finished security or research OS. What the default image does **not** do yet:
 
-- **Run a GUI by default.** Optional Buildroot packages and an unprivileged session are staged; enabling them awaits the UI musl/KMS work (C1). See `kernel-buildroot/README.md`.
-- **Drop root.** `vmm-daemon` and `crosvm` run as root (crosvm keeps its jail/seccomp), and only UID 0 may use the control socket.
+- **Run a GUI by default.** `desktop-shell` (DRM/KMS) and VM Studio have optional Buildroot packages and an unprivileged session, but they are off by default until the graphical session is booted on real hardware. See `kernel-buildroot/README.md`.
+- **Run crosvm unprivileged.** `vmm-daemon` and `crosvm` run as root (crosvm keeps its jail/seccomp). The control socket itself no longer needs root: members of the `hyperos` group may use it.
 - **Verify boot.** No dm-verity, signed Secure Boot or TPM measurement; no A/B updates.
-- **Restore snapshots, run disposable VMs or capture traffic.** Snapshots can be taken but not restored, listed or deleted through the API.
 
 The plan for closing these gaps is in [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md).
 
@@ -38,8 +37,8 @@ LICENSE-MIT / LICENSE-APACHE # Dual-license terms (MIT OR Apache-2.0)
 kernel-buildroot/            # Buildroot BR2_EXTERNAL tree (Linux 6.12.20, runit, vmm-daemon,
                              #   crosvm packaging, initramfs, hybrid GRUB2, nftables, iproute2)
 vmm-daemon/                  # Rust VM daemon supervising crosvm children over Unix RPC
-desktop-shell/               # Workspace-First Wayland compositor (Smithay + Slint, --mock; not yet in image)
-vm-control-ui/               # Zero-Script VM Studio desktop GUI client (Slint, --mock; not yet in image)
+desktop-shell/               # Workspace-First Wayland compositor (Smithay + Slint, --mock; optional image package)
+vm-control-ui/               # Zero-Script VM Studio desktop GUI client (Slint, --mock; optional image package)
 guest-images/                # Reproducible Alpine & Debian Slim CoW base image builders
 docs/                        # Cloud nested-virtualization testing and operational guides
 scripts/                     # Config/image validator, v1 release runner, GNU17 CC wrapper
@@ -134,6 +133,21 @@ The v1 release milestone verifies:
 1. Boot `hyperos.img` with `-m 4096` and confirm `initramfs` mounts EROFS + `128M` OverlayFS and auto-expands `HYPEROS_DATA`.
 2. Capture serial logs and `/proc/meminfo` after 60s idle (target `< 350 MiB` used RAM).
 3. Start an Alpine guest via `/usr/bin/vmm-daemon` over `/run/hyperos/vmm.sock`, write a file inside the guest, shut down, reboot HyperOS, and read the file back.
+
+---
+
+## Credits
+
+The v0.2.0 work was split across three AI coding agents working from one plan,
+[`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md), under the maintainer's review:
+
+| Agent | Built |
+| --- | --- |
+| **Claude** (Anthropic) | Docs audit and work plan, the v2 RPC contract, NAT guests limited to the internet, `hyperos` group socket access, disposable VMs, snapshot restore and delete, daemon packet capture |
+| **Codex** (OpenAI) | crosvm and minijail built from pinned sources, KSM off by default, guest image import and one-command VM boot, UI and session packaging, verified-boot and A/B update design |
+| **Antigravity** (Google) | Musl/KMS-capable desktop shell and VM Studio, non-root socket connection, UI for snapshots, disposable VMs, capture and NAT, data-only themes, app manifest proposal |
+
+Each commit names the agent that wrote it in a `Co-Authored-By` trailer.
 
 ---
 

@@ -27,7 +27,8 @@ for param in $(cat /proc/cmdline); do
             ;;
     esac
 done
-# The daemon assigns per-VM UIDs; only their kvm supplementary group opens KVM.
+# KVM is root:kvm 0660 so crosvm can later drop to unprivileged per-VM UIDs in the
+# kvm group (contract v2, A2); until then crosvm still runs as root.
 if [ -c /dev/kvm ]; then
     chgrp kvm /dev/kvm
     chmod 0660 /dev/kvm

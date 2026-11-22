@@ -5,5 +5,9 @@ config BR2_PACKAGE_VM_CONTROL_UI
 	depends on !BR2_STATIC_LIBS
 	select BR2_PACKAGE_WAYLAND
 	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_XKEYBOARD_CONFIG
+	select BR2_PACKAGE_FONTCONFIG
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_DEJAVU
 	help
 	  Build the local UI crate for musl using host Cargo/Rust.

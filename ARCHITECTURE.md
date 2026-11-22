@@ -7,9 +7,9 @@ UEFI or legacy BIOS/CSM from one hybrid GPT disk image. The host idle target is
 acceptance target, not a measurement established by configuration, and no real
 measurement has been published yet. No desktop, network listener, login shell, or
 guest is started by the base image. Wi-Fi and audio are disabled in the v1 kernel.
-`desktop-shell/` and `vm-control-ui/` exist as source crates (with `--mock` modes)
-but are **not yet packaged into the image**; no display server or GUI runs on the
-booted host today.
+`desktop-shell/` (DRM/KMS) and `vm-control-ui/` have optional Buildroot
+packages but are **off in the default image**, so no display server or GUI runs
+on the booted host by default.
 
 Open review findings and the work plan that addresses them live in
 [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md). Where a section below says
@@ -31,8 +31,8 @@ kernel-buildroot/                  # Buildroot BR2_EXTERNAL=... tree
   board/                           # GRUB (UEFI + BIOS), genimage partition layout
   rootfs-overlay/                   # runit stages and service definitions
 vmm-daemon/                        # Rust daemon supervising crosvm children
-desktop-shell/                     # Smithay + Slint Wayland shell (source only, not packaged)
-vm-control-ui/                     # Slint VM Studio JSON-RPC client (source only, not packaged)
+desktop-shell/                     # Smithay + Slint Wayland shell (optional package, off by default)
+vm-control-ui/                     # Slint VM Studio JSON-RPC client (optional package, off by default)
 guest-images/                     # Alpine / Debian guest disk builders, no disks in git
 docs/                             # testing guides and the review work plan
 scripts/validate-configs.sh         # local/CI acceptance checks
@@ -386,12 +386,11 @@ attach only one copy of the image per machine.
 runit PID 1 mounts proc/sysfs/tmpfs, then supervises zram, KSM, storage and daemon.
 `/run` holds supervision and readiness state so root remains read-only. ZRAM is
 65% of MemTotal, zstd, priority 100; it consumes physical memory on demand and
-is not extra RAM. Current behavior: `/etc/sv/ksm/run` sets
-`/sys/kernel/mm/ksm/run=1` globally, but neither the daemon nor crosvm marks
-guest memory `MADV_MERGEABLE`, so KSM merges nothing today. Cross-VM page sharing
-has side-channel implications and is unsuitable for untrusted guests; the plan is
-to default it off. Stop/reboot via `runit-init 0` / `runit-init 6`; shutdown stops
-daemon before unmounting storage. No guest images are bundled.
+is not extra RAM. KSM is built in (`CONFIG_KSM`) but `/etc/sv/ksm/run` sets
+`/sys/kernel/mm/ksm/run=0`, and nothing marks guest memory `MADV_MERGEABLE`:
+cross-VM page sharing is a side channel and unsuitable for untrusted guests.
+Stop/reboot via `runit-init 0` / `runit-init 6`; shutdown stops daemon before
+unmounting storage. No guest images are bundled.
 
 CI keeps ubuntu-latest and explicitly builds host C tools in GNU17 mode; the
 pinned host m4/gnulib predates newer compilers defaulting to C23. This does not

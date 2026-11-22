@@ -54,26 +54,24 @@ The runner does not test guest persistence across host reboot. It does not
 measure graphical idle RAM. No measured RAM numbers are published until real
 hardware acceptance produces them.
 
-## UI packaging (B4, pending C1)
+## UI packaging (B4)
 
-`BR2_PACKAGE_DESKTOP_SHELL` builds the shell with `--features kms`;
-`BR2_PACKAGE_VM_CONTROL_UI` builds VM Studio. Both use locked crate dependencies
-and the musl target. They remain off in the default defconfig until C1 supplies
-a functioning musl/KMS backend and declares its runtime requirements. In
-particular, the current shell feature enables Smithay backend dependencies but
-does not implement a KMS presentation loop, and its current Slint features do
-not include the `linuxkms-software` backend requested by the target session.
-Do not enable the session in a release image until both are fixed.
+`BR2_PACKAGE_DESKTOP_SHELL` builds the shell with
+`--no-default-features --features kms`: Antigravity's C1 DRM/KMS backend with a
+software framebuffer, libinput and seatd, and no winit, Mesa, EGL or GBM.
+`BR2_PACKAGE_VM_CONTROL_UI` builds VM Studio with
+`--no-default-features --features wayland`. Both use locked crate dependencies,
+the musl target, and select fontconfig, FreeType and DejaVu fonts for Slint's
+software text rendering. They stay off in the default defconfig because the
+graphical session has not yet been booted on real hardware.
 
-To resolve a development graphical configuration, use eudev device management,
-Mesa3D with a Gallium driver (swrast for software rendering), EGL/GBM, then enable
-both packages. The shell package selects libdrm, libinput, libxkbcommon, pixman,
-Wayland and seatd. When those binaries are installed, runit starts udev and
-seatd and launches the shell under UID 1000, with `hyperos` and `video` groups,
-a private XDG runtime directory and the seatd backend. VM Studio is installed
-for launching from the session. No root GUI or password login is enabled.
-The image supplies the control group independently of whether the daemon's A3
-socket authorization has landed; non-root control requires A3 as well.
+To try a graphical build, enable eudev device management and both packages.
+When those binaries are installed, runit starts udev and seatd and launches the
+shell under UID 1000, with `hyperos` and `video` groups, a private XDG runtime
+directory and the seatd backend; the shell picks its KMS backend on its own.
+VM Studio is installed for launching from the session. No root GUI or password
+login is enabled. Membership in `hyperos` lets the session use the daemon's
+control socket (A3).
 
 ## Verified boot and updates (B5)
 

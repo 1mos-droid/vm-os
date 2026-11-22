@@ -281,7 +281,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"list-1","method":"list_vms","params":{}}' 
 
 # 2. create_vm (returns stopped; allocates UUID and Btrfs reflink disk)
 CREATE_RESP="$(printf '%s\n' \
-  '{"jsonrpc":"2.0","id":"create-1","method":"create_vm","params":{"name":"cloud-test","base_image_id":"alpine-3-21-virtio","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated"}}' \
+  '{"jsonrpc":"2.0","id":"create-1","method":"create_vm","params":{"name":"cloud-test","base_image_id":"alpine-3-21-virtio","vcpu_count":1,"ram_mib":1024,"network_mode":"isolated","disposable":false}}' \
   | socat - UNIX-CONNECT:/run/hyperos/vmm.sock)"
 echo "${CREATE_RESP}"
 VM_ID="$(echo "${CREATE_RESP}" | jq -r '.result.vm_id')"

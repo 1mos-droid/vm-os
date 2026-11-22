@@ -112,8 +112,8 @@ jobs:
         run: |
           sudo chroot output/target /usr/bin/crosvm --version
           sudo chroot output/target /usr/bin/crosvm run --help > output/crosvm-run-help.txt
-          rg -- '--pivot-root' output/crosvm-run-help.txt
-          rg -- '--seccomp-policy-dir' output/crosvm-run-help.txt
+          grep -F -e '--pivot-root' output/crosvm-run-help.txt
+          grep -F -e '--seccomp-policy-dir' output/crosvm-run-help.txt
       - name: Smoke-test packaged target vmm-daemon (list_vms over AF_UNIX)
         run: |
           python3 - <<'PY'

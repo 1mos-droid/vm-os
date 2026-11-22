@@ -116,10 +116,9 @@ break. Never forward the socket over TCP.
 ### A4. Snapshot restore, disposable VMs, packet capture (F8–F10)
 
 **Done.** Breaking change for clients: `create_vm` now requires `"disposable"`
-and the VM object has 9 keys. Antigravity (C3) must send it from both UIs;
-Codex must add it to `scripts/test-v1-release.sh`, `hyperos-vm` and the
-`docs/CLOUD_TESTING.md` examples, and set `/var/lib/hyperos` to
-`root:hyperos 0710` in `/etc/sv/storage/run` (the daemon also sets it at start).
+and the VM object has 9 keys. Both UIs (C3), `hyperos-vm`,
+`scripts/test-image-tools.py` and the `docs/CLOUD_TESTING.md` examples send it.
+The daemon sets `/var/lib/hyperos` to `root:hyperos 0710` at start.
 
 Implement the A0 methods with unit and integration tests in the style of
 `tests/lifecycle_integration.rs`. Reuse the existing `ephemeral` storage path for
@@ -254,5 +253,5 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 
 - [x] Docs match the code (this commit)
 - [x] A0 (approved 2026-11-22) · [x] A1 · [ ] A2 · [x] A3 · [x] A4 · [x] A5
-- [ ] B1 · [ ] B2 · [ ] B3 · [ ] B4 · [ ] B5 · [ ] B6
+- [x] B1 · [x] B2 · [x] B3 · [x] B4 · [x] B5 (design; implementation open) · [ ] B6
 - [x] C1 · [x] C2 · [x] C3 · [x] C4 · [x] C5

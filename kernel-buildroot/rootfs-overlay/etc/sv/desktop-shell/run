@@ -4,5 +4,4 @@ while [ ! -f /run/hyperos/ready/udev ] || [ ! -S /run/seatd.sock ] || [ ! -S /ru
 export XDG_RUNTIME_DIR=/run/user/1000
 export HOME=/home/desktop
 export LIBSEAT_BACKEND=seatd
-export SLINT_BACKEND=linuxkms-software
 exec chpst -u desktop:hyperos:video /usr/bin/desktop-shell
