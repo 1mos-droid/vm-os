@@ -843,6 +843,7 @@ dependencies = [
 name = "desktop-shell"
 version = "0.1.0"
 dependencies = [
+ "i-slint-core",
  "serde",
  "serde_json",
  "slint",
@@ -1300,28 +1301,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "gbm"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce852e998d3ca5e4a97014fb31c940dc5ef344ec7d364984525fd11e8a547e6a"
-dependencies = [
- "bitflags 2.13.2",
- "drm",
- "drm-fourcc",
- "gbm-sys",
- "libc",
-]
-
-[[package]]
-name = "gbm-sys"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c13a5f2acc785d8fb6bf6b7ab6bfb0ef5dad4f4d97e8e70bb8e470722312f76f"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -3105,12 +3084,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3170,24 +3143,6 @@ dependencies = [
  "fastrand",
  "futures-io",
 ]
-
-[[package]]
-name = "pixman"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cea217d496c19ac0a8e502b37078e1f683d16344adee9eb247a5d57c165e1edf"
-dependencies = [
- "drm-fourcc",
- "paste",
- "pixman-sys",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "pixman-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1a0483e89e81d7915defe83c51f23f6800594d64f6f4a21253ce87fd8444ada"
 
 [[package]]
 name = "pkg-config"
@@ -3928,7 +3883,6 @@ dependencies = [
  "atomic_float",
  "bitflags 2.13.2",
  "calloop 0.14.5",
- "cc",
  "cgmath",
  "cursor-icon",
  "downcast-rs",
@@ -3936,7 +3890,6 @@ dependencies = [
  "drm-ffi",
  "drm-fourcc",
  "errno",
- "gbm",
  "gl_generator",
  "glow 0.16.0",
  "indexmap",
@@ -3944,8 +3897,6 @@ dependencies = [
  "libc",
  "libloading",
  "libseat",
- "pixman",
- "pkg-config",
  "profiling",
  "rand",
  "rustix 1.1.6",

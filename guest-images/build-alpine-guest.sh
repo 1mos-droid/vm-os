@@ -339,6 +339,16 @@ hvc0::respawn:/sbin/getty -L 115200 hvc0 vt100
 ::shutdown:/sbin/openrc shutdown
 EOF
 
+# A serial marker proves that the guest reached userspace under the host kernel.
+mkdir -p "${MOUNT_DIR}/etc/local.d"
+cat > "${MOUNT_DIR}/etc/local.d/hyperos-ready.start" <<'EOF'
+#!/bin/sh
+echo HYPEROS_GUEST_READY >/dev/ttyS0
+# The opt-in host acceptance service listens here; normal boots need no listener.
+(printf 'HYPEROS_GUEST_READY\n' | socat -T 5 - VSOCK-CONNECT:2:5002) >/dev/null 2>&1 &
+EOF
+chmod 0755 "${MOUNT_DIR}/etc/local.d/hyperos-ready.start"
+
 # Enable essential minimal OpenRC services inside chroot
 chroot "${MOUNT_DIR}" /bin/sh -eux <<'CHROOT_SVC'
 rc-update add devfs sysinit
@@ -346,6 +356,7 @@ rc-update add dmesg sysinit
 rc-update add mdev sysinit
 rc-update add modules boot
 rc-update add hostname boot
+rc-update add local default
 rc-update add bootmisc boot
 rc-update add hyperos-virtiofs default
 rc-update add hyperos-vsock-bridge default

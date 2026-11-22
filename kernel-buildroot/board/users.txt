@@ -1,0 +1,4 @@
+# name uid group gid password home shell groups comment
+- - hyperos 970 - - - - VM-control
+- - kvm 78 - - - - KVM-access
+desktop 1000 hyperos 970 ! /home/desktop /bin/false video Desktop-session

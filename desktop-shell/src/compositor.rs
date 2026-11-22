@@ -562,7 +562,7 @@ mod tests {
             vm_id: "10000000-0000-4000-8000-000000000003".into(),
             vm_name: "Offline Vault".into(),
             network_mode: "isolated".into(),
-            ephemeral: false,
+            disposable: false,
         };
         let win_id = state.register_managed_window(
             "Key Manager",

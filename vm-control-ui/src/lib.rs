@@ -6,3 +6,4 @@ pub mod mock;
 pub mod rpc;
 pub mod studio;
 pub mod templates;
+pub mod theme;

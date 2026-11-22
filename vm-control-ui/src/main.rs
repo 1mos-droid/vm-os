@@ -13,14 +13,15 @@ use vm_control_ui::client::{UnixSocketClient, VmmBackend};
 use vm_control_ui::metrics::read_host_metrics;
 use vm_control_ui::mock::MockVmmBackend;
 use vm_control_ui::rpc::{
-    is_valid_vm_name, CreateVmParams, NetworkMode, Vm, VmState, BASE_IMAGES_DIR,
-    DEFAULT_SOCKET_PATH,
+    format_capture_bytes, is_valid_vm_name, Capture, CaptureState, CreateVmParams, NetworkMode, Vm,
+    VmState, BASE_IMAGES_DIR, CAPTURES_DIR, DEFAULT_SOCKET_PATH,
 };
 use vm_control_ui::studio::{
     advance_store_downloads, compute_cow_storage_savings, default_store_catalog, CheckpointCard,
     DisplayMode, GuidedSettings, MemoryProfile, NetworkPreset, StoreTemplate, TemplateStatus,
 };
 use vm_control_ui::templates::{discover_templates, GuestTemplate};
+use vm_control_ui::theme::{load_theme_or_fallback, parse_hex_rgb, resolve_theme_path, ThemeFile};
 
 slint::include_modules!();
 
@@ -30,6 +31,7 @@ struct CliConfig {
     mock: bool,
     socket_path: PathBuf,
     base_images_dir: PathBuf,
+    theme: Option<PathBuf>,
 }
 
 impl Default for CliConfig {
@@ -38,15 +40,14 @@ impl Default for CliConfig {
             mock: false,
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             base_images_dir: PathBuf::from(BASE_IMAGES_DIR),
+            theme: None,
         }
     }
 }
 
-/// Client-side VM studio preferences (never injected into v1 `create_vm` RPC
-/// because `ARCHITECTURE.md` strictly rejects unknown keys).
+/// Client-side VM studio preferences (display & balloon idle target; `disposable` lives on `Vm`).
 #[derive(Debug, Clone)]
 struct VmClientPolicy {
-    ephemeral: bool,
     desired_min_ram_mib: u32,
     display_mode: DisplayMode,
 }
@@ -54,7 +55,6 @@ struct VmClientPolicy {
 impl Default for VmClientPolicy {
     fn default() -> Self {
         Self {
-            ephemeral: false,
             desired_min_ram_mib: 256,
             display_mode: DisplayMode::SeamlessAppWindow,
         }
@@ -68,6 +68,7 @@ struct AppState {
     store_catalog: Vec<StoreTemplate>,
     policies: HashMap<String, VmClientPolicy>,
     checkpoints: Vec<CheckpointCard>,
+    captures: Vec<Capture>,
     cached_vms: Vec<Vm>,
     settings: GuidedSettings,
 }
@@ -91,6 +92,12 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
                 })?;
                 cfg.base_images_dir = PathBuf::from(path);
             }
+            "--theme" => {
+                let path = args.next().ok_or_else(|| {
+                    "--theme requires a JSON theme file path argument".to_string()
+                })?;
+                cfg.theme = Some(PathBuf::from(path));
+            }
             "-h" | "--help" => {
                 println!(
                     "HyperOS Zero-Script VM Studio (vm-control-ui)\n\
@@ -102,6 +109,7 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
                        --mock                 Run with an in-memory mock VMM backend\n\
                        --socket <PATH>        Unix domain socket path (default: {DEFAULT_SOCKET_PATH})\n\
                        --base-images <DIR>    Base images directory (default: {BASE_IMAGES_DIR})\n\
+                       --theme <PATH>         Load a JSON token theme file (or set HYPEROS_THEME)\n\
                        -h, --help             Print this help message"
                 );
                 return Ok(None);
@@ -115,22 +123,99 @@ fn parse_args() -> Result<Option<CliConfig>, String> {
     Ok(Some(cfg))
 }
 
-fn vm_accent_color(vm: &Vm, ephemeral: bool) -> Color {
+fn theme_color(hex: &str) -> Color {
+    let (r, g, b) = parse_hex_rgb(hex).expect("validated ThemeFile must hold #RRGGBB colors");
+    Color::from_rgb_u8(r, g, b)
+}
+
+fn apply_theme_to_ui(ui: &MainWindow, theme: &ThemeFile) {
+    let g = ui.global::<Theme>();
+    g.set_id(SharedString::from(theme.id.as_str()));
+    g.set_name(SharedString::from(theme.name.as_str()));
+    g.set_layout_preset(SharedString::from(theme.layout_preset.as_str()));
+    g.set_density_level(theme.layout_preset.density_level());
+    g.set_window_bg(theme_color(&theme.colors.window_bg));
+    g.set_canvas_bg(theme_color(&theme.colors.canvas_bg));
+    g.set_surface_bg(theme_color(&theme.colors.surface_bg));
+    g.set_surface_elevated(theme_color(&theme.colors.surface_elevated));
+    g.set_border(theme_color(&theme.colors.border));
+    g.set_text_primary(theme_color(&theme.colors.text_primary));
+    g.set_text_secondary(theme_color(&theme.colors.text_secondary));
+    g.set_text_muted(theme_color(&theme.colors.text_muted));
+    g.set_accent(theme_color(&theme.colors.accent));
+    g.set_danger(theme_color(&theme.colors.danger));
+    g.set_success(theme_color(&theme.colors.success));
+    g.set_ui_font_family(SharedString::from(theme.fonts.ui_family.as_str()));
+    g.set_mono_font_family(SharedString::from(theme.fonts.mono_family.as_str()));
+    g.set_font_base(theme.fonts.base_size_px as f32);
+    g.set_font_heading(theme.fonts.heading_size_px as f32);
+    g.set_radius_sm(theme.radii.sm_px as f32);
+    g.set_radius_md(theme.radii.md_px as f32);
+    g.set_radius_lg(theme.radii.lg_px as f32);
+    g.set_radius_pill(theme.radii.pill_px as f32);
+    g.set_space_xs(theme.spacing.xs_px as f32);
+    g.set_space_sm(theme.spacing.sm_px as f32);
+    g.set_space_md(theme.spacing.md_px as f32);
+    g.set_space_lg(theme.spacing.lg_px as f32);
+    g.invoke_sync_palette(!theme.is_light_surface());
+}
+
+fn vm_accent_color(vm: &Vm) -> Color {
     match vm.network_mode {
         NetworkMode::Isolated => Color::from_rgb_u8(245, 158, 11), // Amber Shield
-        NetworkMode::Nat if ephemeral => Color::from_rgb_u8(6, 182, 212), // Cyan Pulse
+        NetworkMode::Nat if vm.disposable => Color::from_rgb_u8(6, 182, 212), // Cyan Pulse
         NetworkMode::Nat => Color::from_rgb_u8(16, 185, 129),      // Emerald Mint
         NetworkMode::HostOnly => Color::from_rgb_u8(139, 92, 246), // Violet Spark
     }
 }
 
-fn vm_to_ui(vm: &Vm, policy: Option<&VmClientPolicy>, checkpoint_count: usize) -> VmItem {
+fn summarize_vm_capture(vm: &Vm, vm_captures: &[&Capture]) -> (bool, bool, String) {
+    let capture_supported = vm.network_mode != NetworkMode::Isolated;
+    if let Some(active) = vm_captures
+        .iter()
+        .find(|c| c.state == CaptureState::Running)
+    {
+        return (
+            capture_supported,
+            true,
+            format!("● Capturing · {}", format_capture_bytes(active.bytes)),
+        );
+    }
+    if !capture_supported {
+        return (false, false, "No NIC (isolated)".to_string());
+    }
+    if let Some(latest) = vm_captures.iter().max_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.capture_id.cmp(&b.capture_id))
+    }) {
+        let label = match latest.state {
+            CaptureState::LimitReached => {
+                format!("Limit Reached ({})", format_capture_bytes(latest.bytes))
+            }
+            CaptureState::Stopped => format!("Stopped · {}", format_capture_bytes(latest.bytes)),
+            CaptureState::Running => {
+                format!("● Capturing · {}", format_capture_bytes(latest.bytes))
+            }
+        };
+        return (true, false, label);
+    }
+    (true, false, "Capture Idle".to_string())
+}
+
+fn vm_to_ui(
+    vm: &Vm,
+    policy: Option<&VmClientPolicy>,
+    checkpoint_count: usize,
+    vm_captures: &[&Capture],
+) -> VmItem {
     let short_id = vm.vm_id.chars().take(8).collect::<String>();
-    let ephemeral = policy.map(|p| p.ephemeral).unwrap_or(false);
     let display_mode = policy
         .map(|p| p.display_mode)
         .unwrap_or(DisplayMode::SeamlessAppWindow);
     let net_preset = NetworkPreset::from_network_mode(vm.network_mode);
+    let (capture_supported, capture_active, capture_status_label) =
+        summarize_vm_capture(vm, vm_captures);
 
     VmItem {
         vm_id: SharedString::from(vm.vm_id.as_str()),
@@ -144,10 +229,13 @@ fn vm_to_ui(vm: &Vm, policy: Option<&VmClientPolicy>, checkpoint_count: usize) -
         network_plain_label: SharedString::from(net_preset.plain_label()),
         display_mode_label: SharedString::from(display_mode.label()),
         state: SharedString::from(vm.state.as_str()),
-        ephemeral,
+        disposable: vm.disposable,
         desired_min_ram_mib: policy.map(|p| p.desired_min_ram_mib as i32).unwrap_or(0),
-        accent: vm_accent_color(vm, ephemeral),
+        accent: vm_accent_color(vm),
         checkpoint_count: checkpoint_count as i32,
+        capture_supported,
+        capture_active,
+        capture_status_label: SharedString::from(capture_status_label),
     }
 }
 
@@ -199,16 +287,57 @@ fn sync_checkpoints_ui(ui: &MainWindow, state: &AppState) {
     let items: Vec<CheckpointItem> = state
         .checkpoints
         .iter()
-        .map(|cp| CheckpointItem {
-            snapshot_id: SharedString::from(cp.snapshot_id.as_str()),
-            short_snap_id: SharedString::from(cp.snapshot_id.chars().take(8).collect::<String>()),
-            vm_id: SharedString::from(cp.vm_id.as_str()),
-            vm_name: SharedString::from(cp.vm_name.as_str()),
-            label: SharedString::from(cp.label.as_str()),
-            created_at: SharedString::from(cp.created_at.as_str()),
+        .map(|cp| {
+            let vm_stopped = state
+                .cached_vms
+                .iter()
+                .find(|v| v.vm_id == cp.vm_id)
+                .is_some_and(|v| v.state == VmState::Stopped);
+            CheckpointItem {
+                snapshot_id: SharedString::from(cp.snapshot_id.as_str()),
+                short_snap_id: SharedString::from(
+                    cp.snapshot_id.chars().take(8).collect::<String>(),
+                ),
+                vm_id: SharedString::from(cp.vm_id.as_str()),
+                vm_name: SharedString::from(cp.vm_name.as_str()),
+                label: SharedString::from(cp.label.as_str()),
+                created_at: SharedString::from(cp.created_at.as_str()),
+                vm_stopped,
+            }
         })
         .collect();
     ui.set_checkpoints(ModelRc::new(VecModel::from(items)));
+}
+
+fn sync_captures_ui(ui: &MainWindow, state: &AppState) {
+    let items: Vec<CaptureItem> = state
+        .captures
+        .iter()
+        .map(|cap| {
+            let vm_name = state
+                .cached_vms
+                .iter()
+                .find(|v| v.vm_id == cap.vm_id)
+                .map(|v| v.name.as_str())
+                .unwrap_or("Space");
+            CaptureItem {
+                capture_id: SharedString::from(cap.capture_id.as_str()),
+                short_capture_id: SharedString::from(
+                    cap.capture_id.chars().take(8).collect::<String>(),
+                ),
+                vm_id: SharedString::from(cap.vm_id.as_str()),
+                vm_name: SharedString::from(vm_name),
+                started_at: SharedString::from(cap.started_at.as_str()),
+                state: SharedString::from(cap.state.as_str()),
+                bytes_label: SharedString::from(format_capture_bytes(cap.bytes)),
+                pcap_hint: SharedString::from(format!(
+                    "{CAPTURES_DIR}/{}/{}.pcap",
+                    cap.vm_id, cap.capture_id
+                )),
+            }
+        })
+        .collect();
+    ui.set_captures(ModelRc::new(VecModel::from(items)));
 }
 
 fn refresh_metrics_ui(ui: &MainWindow, state: &AppState) {
@@ -284,6 +413,26 @@ fn sync_vms_ui(ui: &MainWindow, state: &mut AppState) {
     match state.backend.list_vms() {
         Ok(vms) => {
             state.cached_vms = vms;
+
+            let mut all_checkpoints = Vec::new();
+            let mut all_captures = Vec::new();
+            for vm in &state.cached_vms {
+                if let Ok(snaps) = state.backend.list_snapshots(&vm.vm_id) {
+                    for (idx, snap) in snaps.into_iter().enumerate() {
+                        all_checkpoints.push(CheckpointCard::from_snapshot(
+                            snap,
+                            vm.name.as_str(),
+                            idx + 1,
+                        ));
+                    }
+                }
+                if let Ok(mut caps) = state.backend.list_captures(&vm.vm_id) {
+                    all_captures.append(&mut caps);
+                }
+            }
+            state.checkpoints = all_checkpoints;
+            state.captures = all_captures;
+
             let items: Vec<VmItem> = state
                 .cached_vms
                 .iter()
@@ -293,7 +442,12 @@ fn sync_vms_ui(ui: &MainWindow, state: &mut AppState) {
                         .iter()
                         .filter(|c| c.vm_id == vm.vm_id)
                         .count();
-                    vm_to_ui(vm, state.policies.get(&vm.vm_id), cp_count)
+                    let vm_caps: Vec<&Capture> = state
+                        .captures
+                        .iter()
+                        .filter(|c| c.vm_id == vm.vm_id)
+                        .collect();
+                    vm_to_ui(vm, state.policies.get(&vm.vm_id), cp_count, &vm_caps)
                 })
                 .collect();
             ui.set_vms(ModelRc::new(VecModel::from(items)));
@@ -301,10 +455,11 @@ fn sync_vms_ui(ui: &MainWindow, state: &mut AppState) {
         }
         Err(err) => {
             ui.set_backend_connected(false);
-            set_status(ui, format!("Failed to query list_vms: {err}"), true);
+            set_status(ui, err.to_string(), true);
         }
     }
     sync_checkpoints_ui(ui, state);
+    sync_captures_ui(ui, state);
     refresh_metrics_ui(ui, state);
 }
 
@@ -342,6 +497,7 @@ fn wire_ui(
         store_catalog,
         policies: HashMap::new(),
         checkpoints: Vec::new(),
+        captures: Vec::new(),
         cached_vms: Vec::new(),
         settings,
     }));
@@ -456,7 +612,7 @@ fn wire_ui(
         });
     }
 
-    // Save Checkpoint (snapshot_vm)
+    // Save Snapshot (snapshot_vm)
     {
         let ui_weak = ui.as_weak();
         let state = Rc::clone(&state);
@@ -471,58 +627,123 @@ fn wire_ui(
                     .unwrap_or_else(|| "Space".to_string());
                 match st.backend.snapshot_vm(vm_id.as_str()) {
                     Ok(snap) => {
-                        let idx = st
-                            .checkpoints
-                            .iter()
-                            .filter(|c| c.vm_id == snap.vm_id)
-                            .count()
-                            + 1;
-                        let card = CheckpointCard::from_snapshot(snap.clone(), &vm_name, idx);
-                        st.checkpoints.insert(0, card);
                         set_status(
                             &ui,
                             format!(
-                                "Saved Checkpoint #{idx} for '{vm_name}' ({} at {}).",
+                                "Saved snapshot {} for '{vm_name}' ({}).",
                                 snap.snapshot_id, snap.created_at
                             ),
                             false,
                         );
                     }
-                    Err(err) => set_status(&ui, format!("Save Checkpoint failed: {err}"), true),
+                    Err(err) => set_status(&ui, format!("Save snapshot failed: {err}"), true),
                 }
                 sync_vms_ui(&ui, &mut st);
             }
         });
     }
 
-    // Visual Rewind Checkpoint
+    // Restore Snapshot (confirmed via data-loss warning modal)
     {
         let ui_weak = ui.as_weak();
         let state = Rc::clone(&state);
-        ui.on_rewind_checkpoint(move |vm_id, snap_id| {
+        ui.on_confirm_restore_snapshot(move |vm_id, snap_id| {
             if let Some(ui) = ui_weak.upgrade() {
-                let st = state.borrow();
-                let cp_label = st
-                    .checkpoints
-                    .iter()
-                    .find(|c| c.snapshot_id == snap_id.as_str())
-                    .map(|c| format!("{} ({})", c.vm_name, c.label))
-                    .unwrap_or_else(|| vm_id.to_string());
-                if st.mock_mode {
-                    set_status(
+                let mut st = state.borrow_mut();
+                match st
+                    .backend
+                    .restore_snapshot(vm_id.as_str(), snap_id.as_str())
+                {
+                    Ok(vm) => {
+                        set_status(
+                            &ui,
+                            format!("Restored snapshot {snap_id} onto Space '{}'.", vm.name),
+                            false,
+                        );
+                    }
+                    Err(err) => set_status(&ui, format!("restore_snapshot failed: {err}"), true),
+                }
+                sync_vms_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    // Delete Snapshot (delete_snapshot)
+    {
+        let ui_weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_delete_snapshot(move |vm_id, snap_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state.borrow_mut();
+                match st.backend.delete_snapshot(vm_id.as_str(), snap_id.as_str()) {
+                    Ok(()) => {
+                        set_status(&ui, format!("Deleted snapshot {snap_id}."), false);
+                    }
+                    Err(err) => set_status(&ui, format!("delete_snapshot failed: {err}"), true),
+                }
+                sync_vms_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    // Packet Capture Start / Stop / Delete
+    {
+        let ui_weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_start_capture(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state.borrow_mut();
+                match st.backend.start_capture(vm_id.as_str()) {
+                    Ok(cap) => set_status(
                         &ui,
-                        format!("Rewound {cp_label} to read-only Btrfs checkpoint {snap_id} (mock preview)."),
+                        format!("Started packet capture {} for VM {vm_id}.", cap.capture_id),
                         false,
-                    );
-                } else {
-                    set_status(
+                    ),
+                    Err(err) => set_status(&ui, format!("start_capture failed: {err}"), true),
+                }
+                sync_vms_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_stop_capture(move |vm_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state.borrow_mut();
+                match st.backend.stop_capture(vm_id.as_str()) {
+                    Ok(cap) => set_status(
                         &ui,
                         format!(
-                            "Checkpoint {snap_id} is preserved read-only under /var/lib/hyperos/instances/{vm_id}/snapshots/{snap_id}/ (restore RPC planned for contract v2)."
+                            "Stopped capture {} ({}, {}).",
+                            cap.capture_id,
+                            cap.state,
+                            format_capture_bytes(cap.bytes)
                         ),
                         false,
-                    );
+                    ),
+                    Err(err) => set_status(&ui, format!("stop_capture failed: {err}"), true),
                 }
+                sync_vms_ui(&ui, &mut st);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_delete_capture(move |vm_id, capture_id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = state.borrow_mut();
+                match st
+                    .backend
+                    .delete_capture(vm_id.as_str(), capture_id.as_str())
+                {
+                    Ok(()) => set_status(&ui, format!("Deleted capture {capture_id}."), false),
+                    Err(err) => set_status(&ui, format!("delete_capture failed: {err}"), true),
+                }
+                sync_vms_ui(&ui, &mut st);
             }
         });
     }
@@ -534,15 +755,10 @@ fn wire_ui(
         ui.on_confirm_stop_vm(move |vm_id| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut st = state.borrow_mut();
-                let is_ephemeral = st
-                    .policies
-                    .get(vm_id.as_str())
-                    .map(|p| p.ephemeral)
-                    .unwrap_or(false);
                 match st.backend.stop_vm(vm_id.as_str()) {
                     Ok(vm) => {
-                        let extra = if is_ephemeral {
-                            " Temporary CoW disk layer flagged for Self-Destruct cleanup."
+                        let extra = if vm.disposable {
+                            " Disposable CoW disk layer flagged for reset."
                         } else {
                             ""
                         };
@@ -671,7 +887,7 @@ fn wire_ui(
                 let network_preset = NetworkPreset::from_index(ui.get_wizard_network_mode());
                 let network_mode = network_preset.to_network_mode();
                 let display_mode = DisplayMode::from_index(ui.get_wizard_display_mode());
-                let ephemeral = ui.get_wizard_ephemeral();
+                let disposable = ui.get_wizard_disposable();
 
                 let params = CreateVmParams {
                     name,
@@ -679,6 +895,7 @@ fn wire_ui(
                     vcpu_count,
                     ram_mib: max_ram_mib,
                     network_mode,
+                    disposable,
                 };
 
                 match st.backend.create_vm(params) {
@@ -686,21 +903,22 @@ fn wire_ui(
                         st.policies.insert(
                             vm.vm_id.clone(),
                             VmClientPolicy {
-                                ephemeral,
                                 desired_min_ram_mib: min_ram_mib,
                                 display_mode,
                             },
                         );
                         ui.set_wizard_name(SharedString::from(""));
-                        ui.set_wizard_ephemeral(false);
+                        ui.set_wizard_disposable(false);
                         ui.set_active_tab(0);
+                        let disp_tag = if vm.disposable { " · Disposable" } else { "" };
                         set_status(
                             &ui,
                             format!(
-                                "Created Space '{}' ({} · {} · {}–{} MiB).",
+                                "Created Space '{}' ({} · {}{} · {}–{} MiB).",
                                 vm.name,
                                 network_preset.plain_label(),
                                 display_mode.label(),
+                                disp_tag,
                                 min_ram_mib,
                                 vm.ram_mib
                             ),
@@ -852,6 +1070,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    let env_theme = std::env::var("HYPEROS_THEME").ok();
+    let theme_path = resolve_theme_path(cfg.theme.as_deref(), env_theme.as_deref());
+    let theme_outcome = load_theme_or_fallback(theme_path.as_deref());
+    if let Some(ref warning) = theme_outcome.warning {
+        eprintln!("vm-control-ui: {warning}");
+    }
+
     let backend: Box<dyn VmmBackend> = if cfg.mock {
         Box::new(MockVmmBackend::with_sample_vms())
     } else {
@@ -860,16 +1085,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let templates = discover_templates(&cfg.base_images_dir, cfg.mock);
     let ui = MainWindow::new()?;
+    apply_theme_to_ui(&ui, &theme_outcome.theme);
     let state = wire_ui(&ui, cfg.mock, backend, templates);
+    if let Some(warning) = theme_outcome.warning {
+        if !ui.get_status_is_error() {
+            set_status(&ui, warning, true);
+        }
+    }
 
-    // Periodic host RAM / ZRAM telemetry refresh every 2 seconds
+    // Periodic host RAM / ZRAM telemetry & active mock capture counter refresh every 2 seconds
     let metrics_timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
         let state = Rc::clone(&state);
         metrics_timer.start(TimerMode::Repeated, Duration::from_secs(2), move || {
             if let Some(ui) = ui_weak.upgrade() {
-                refresh_metrics_ui(&ui, &state.borrow());
+                let mut st = state.borrow_mut();
+                let has_active_cap = st.captures.iter().any(|c| c.state == CaptureState::Running);
+                if st.mock_mode && has_active_cap {
+                    st.backend.tick_mock_captures();
+                    sync_vms_ui(&ui, &mut st);
+                } else {
+                    refresh_metrics_ui(&ui, &st);
+                }
             }
         });
     }
@@ -934,8 +1172,17 @@ mod tests {
 
         assert!(ui.get_mock_mode());
         assert!(ui.get_backend_connected());
-        assert_eq!(ui.get_vms().row_count(), 2);
+        assert_eq!(ui.get_vms().row_count(), 3);
+        assert_eq!(ui.get_checkpoints().row_count(), 1);
+        assert_eq!(ui.get_captures().row_count(), 1);
         assert_eq!(ui.get_store_cards().row_count(), 4);
+
+        let web_vm = (0..ui.get_vms().row_count())
+            .filter_map(|i| ui.get_vms().row_data(i))
+            .find(|v| v.name == "web-research")
+            .unwrap();
+        assert!(web_vm.disposable);
+        assert_eq!(web_vm.network_plain_label, "NAT · Internet Only");
 
         // 1. Render Spaces view
         let mut frame_buf = vec![Rgb565Pixel(0); 1100 * 780];
@@ -958,14 +1205,14 @@ mod tests {
             .unwrap();
         assert!(provisioned.installed);
 
-        // 3. Create Space: Plain-English Flow (Safe Web + Heavy + Full Environment + Self-Destruct)
+        // 3. Create Space: Disposable NAT Space
         ui.invoke_use_store_template(SharedString::from("browser-sandbox-virtio"));
         assert_eq!(ui.get_active_tab(), 1);
         ui.set_wizard_name(SharedString::from("Banking Sandbox"));
-        ui.set_wizard_network_mode(1); // Safe Web -> nat
+        ui.set_wizard_network_mode(1); // NAT -> nat
         ui.invoke_select_memory_profile(0); // Light -> 256..512 MiB
         ui.set_wizard_display_mode(1); // Full Environment
-        ui.set_wizard_ephemeral(true); // Self-Destruct on Close
+        ui.set_wizard_disposable(true);
         window.draw_if_needed(|renderer| {
             renderer.render(&mut frame_buf, 1100);
         });
@@ -973,40 +1220,103 @@ mod tests {
         ui.invoke_create_vm_submitted();
         assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
         assert_eq!(ui.get_active_tab(), 0);
-        assert_eq!(ui.get_vms().row_count(), 3);
+        assert_eq!(ui.get_vms().row_count(), 4);
 
         let created = (0..ui.get_vms().row_count())
             .filter_map(|i| ui.get_vms().row_data(i))
             .find(|v| v.name == "Banking Sandbox")
             .expect("created Space must appear in Spaces view");
         assert_eq!(created.network_mode, "nat");
-        assert_eq!(created.network_plain_label, "Safe Web");
+        assert_eq!(created.network_plain_label, "NAT · Internet Only");
         assert_eq!(created.display_mode_label, "Full Environment");
-        assert!(created.ephemeral);
+        assert!(created.disposable);
         assert_eq!(created.ram_mib, 512);
 
-        // 4. Lifecycle + Visual Checkpoint Save & Rewind
+        // Disposable VM rejects snapshots (-32002)
         let vm_id = created.vm_id.clone();
+        ui.invoke_snapshot_vm(vm_id.clone());
+        assert!(ui.get_status_is_error());
+
+        // Start, packet capture start/stop/delete, balloon, pause, stop on disposable NAT VM
         ui.invoke_start_vm(vm_id.clone());
         assert!(!ui.get_status_is_error());
+        ui.invoke_start_capture(vm_id.clone());
+        assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
+        assert_eq!(ui.get_captures().row_count(), 2);
+        ui.invoke_stop_capture(vm_id.clone());
+        assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
+        let new_cap = (0..ui.get_captures().row_count())
+            .filter_map(|i| ui.get_captures().row_data(i))
+            .find(|c| c.vm_id == vm_id)
+            .unwrap();
+        ui.invoke_delete_capture(new_cap.vm_id, new_cap.capture_id);
+        assert!(!ui.get_status_is_error());
+        assert_eq!(ui.get_captures().row_count(), 1);
+
         ui.invoke_reclaim_ram_requested();
         ui.invoke_pause_vm(vm_id.clone());
         assert!(!ui.get_status_is_error());
         ui.invoke_confirm_stop_vm(vm_id.clone());
         assert!(!ui.get_status_is_error());
-        ui.invoke_snapshot_vm(vm_id.clone());
-        assert!(!ui.get_status_is_error());
-        assert_eq!(ui.get_checkpoints().row_count(), 1);
+
+        // Persistent stopped VM: snapshot_vm -> list -> restore -> delete
+        let debian_id = SharedString::from("7d5a9f12-4421-4b90-8c34-99f012cd0002");
+        ui.invoke_snapshot_vm(debian_id.clone());
+        assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
+        assert_eq!(ui.get_checkpoints().row_count(), 2);
 
         let cp = ui.get_checkpoints().row_data(0).unwrap();
-        ui.invoke_rewind_checkpoint(cp.vm_id, cp.snapshot_id);
-        assert!(!ui.get_status_is_error());
+        assert!(cp.vm_stopped);
+        ui.invoke_confirm_restore_snapshot(cp.vm_id.clone(), cp.snapshot_id.clone());
+        assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
+        ui.invoke_delete_snapshot(cp.vm_id, cp.snapshot_id);
+        assert!(!ui.get_status_is_error(), "{}", ui.get_status_message());
+        assert_eq!(ui.get_checkpoints().row_count(), 1);
+
+        // Isolated running VM rejects packet capture (-32004)
+        ui.invoke_start_capture(SharedString::from("2b1c48a0-9e3f-4c11-9a12-104088ab0001"));
+        assert!(ui.get_status_is_error());
 
         // 5. Guided Settings view + Btrfs CoW storage savings readout
         ui.set_active_tab(3);
         ui.set_settings_display_scale(125);
         ui.invoke_settings_changed();
         assert!(ui.get_cow_headline().contains("GiB saved"));
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut frame_buf, 1100);
+        });
+
+        // 6. C4 Data Themes: Obsidian & Daylight switch + origin color isolation
+        let obsidian =
+            vm_control_ui::theme::parse_theme_str(vm_control_ui::theme::BUILTIN_OBSIDIAN_JSON)
+                .unwrap();
+        let daylight =
+            vm_control_ui::theme::parse_theme_str(vm_control_ui::theme::BUILTIN_DAYLIGHT_JSON)
+                .unwrap();
+
+        ui.set_active_tab(0);
+        apply_theme_to_ui(&ui, &obsidian);
+        assert_eq!(ui.global::<Theme>().get_id(), "obsidian");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "compact");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 0);
+        let origin_before = ui.get_vms().row_data(0).unwrap().accent;
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut frame_buf, 1100);
+        });
+
+        apply_theme_to_ui(&ui, &daylight);
+        assert_eq!(ui.global::<Theme>().get_id(), "daylight");
+        assert_eq!(ui.global::<Theme>().get_layout_preset(), "comfortable");
+        assert_eq!(ui.global::<Theme>().get_density_level(), 1);
+        assert_eq!(
+            ui.global::<Theme>().get_window_bg(),
+            Color::from_rgb_u8(226, 232, 240)
+        );
+        assert_eq!(ui.global::<Theme>().get_ui_font_family(), "DejaVu Sans");
+        assert!((ui.global::<Theme>().get_font_base() - 13.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_radius_md() - 12.0).abs() < 0.01);
+        assert!((ui.global::<Theme>().get_space_md() - 14.0).abs() < 0.01);
+        assert_eq!(ui.get_vms().row_data(0).unwrap().accent, origin_before);
         window.draw_if_needed(|renderer| {
             renderer.render(&mut frame_buf, 1100);
         });

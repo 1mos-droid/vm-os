@@ -6,31 +6,40 @@ description = "Original Workspace-First Wayland desktop shell for HyperOS built 
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
-# Enable bare-metal DRM/KMS/libinput/seatd backend when building inside HyperOS Buildroot.
-kms = [
+default = ["winit"]
+# Nested development & mock preview window (X11/Wayland via winit).
+winit = [
+    "slint/backend-winit",
+    "smithay/backend_winit",
+    "smithay/renderer_glow",
+]
+# Bare-metal DRM/KMS + udev + libinput backend without libseat (direct-VT or compile check).
+kms-direct = [
     "smithay/backend_drm",
-    "smithay/backend_gbm",
     "smithay/backend_udev",
     "smithay/backend_libinput",
+]
+# Full bare-metal DRM/KMS + udev + libinput + seatd/libseat backend for HyperOS images.
+kms = [
+    "kms-direct",
     "smithay/backend_session_libseat",
 ]
 
 [dependencies]
+# Custom KMS MinimalSoftwareWindow platform needs i-slint-core's default
+# (shared-parley + unicode), image-decoders, and svg features explicitly when
+# slint/backend-winit is disabled (matching i-slint-backend-linuxkms).
+i-slint-core = { version = "1.19", features = ["image-decoders", "svg"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 slint = { version = "1.19", default-features = false, features = [
     "std",
-    "backend-winit",
     "renderer-software",
     "compat-1-2",
 ] }
 smithay = { version = "0.7", default-features = false, features = [
     "wayland_frontend",
     "desktop",
-    "renderer_pixman",
-    "renderer_glow",
-    "backend_winit",
 ] }
 uuid = { version = "1.11", features = ["v4"] }
 

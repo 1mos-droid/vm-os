@@ -9,7 +9,7 @@ Thank you for your interest in contributing to HyperOS! Because HyperOS integrat
 [`ARCHITECTURE.md`](ARCHITECTURE.md) is the **single source of truth** for the entire repository.
 
 - Every Unix socket path (`/run/hyperos/vmm.sock`), JSON-RPC 2.0 request/response schema, error code, and persistent Btrfs storage path (`/var/lib/hyperos/...`) **must match `ARCHITECTURE.md` verbatim**.
-- **Never silently deviate from the contract.** If a feature requires adding or changing an RPC method, parameter, error code, socket permission, or storage layout, propose and review the change to `ARCHITECTURE.md` first and coordinate updates across all affected components (`kernel-buildroot/`, `vmm-daemon/`, `vm-control-ui/`, `guest-images/`).
+- **Never silently deviate from the contract.** If a feature requires adding or changing an RPC method, parameter, error code, socket permission, or storage layout, propose and review the change to `ARCHITECTURE.md` first and coordinate updates across all affected components (`kernel-buildroot/`, `vmm-daemon/`, `vm-control-ui/`, `desktop-shell/`, `guest-images/`).
 
 ---
 
@@ -22,6 +22,7 @@ Keep pull requests focused on a single subsystem unless you are landing an appro
 | `kernel-buildroot/` | Buildroot `BR2_EXTERNAL` configs, kernel config, `runit` packaging, board/GRUB image generation, rootfs overlay |
 | `vmm-daemon/` | Rust VM lifecycle daemon, `crosvm` supervision, Btrfs storage & network sandboxing |
 | `vm-control-ui/` | Lightweight native desktop GUI client over `/run/hyperos/vmm.sock` (plus `--mock` mode) |
+| `desktop-shell/` | Workspace-First Wayland compositor (Smithay + Slint) talking to `/run/hyperos/vmm.sock` (plus `--mock` mode) |
 | `guest-images/` | Reproducible guest base-image build scripts and import manifests |
 | `docs/` | Operational, cloud-testing, and user documentation |
 | `scripts/` & `.github/workflows/` | Config validators, compiler wrappers, and CI pipelines |
@@ -96,7 +97,7 @@ scripts/validate-configs.sh
   scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
   ```
 
-### Rust Crates (`vmm-daemon/`, `vm-control-ui/`)
+### Rust Crates (`vmm-daemon/`, `vm-control-ui/`, `desktop-shell/`)
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

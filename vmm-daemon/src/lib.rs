@@ -1,5 +1,7 @@
 //! HyperOS `vmm-daemon` library modules for clean unit and integration testing.
 
+pub mod auth;
+pub mod capture;
 pub mod hypervisor;
 pub mod manager;
 pub mod network;

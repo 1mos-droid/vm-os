@@ -1,6 +1,7 @@
 //! Async Tokio AF_UNIX JSON-RPC 2.0 server with `SO_PEERCRED` authorization,
 //! serialized startup lock, stale-socket cleanup, and strict 65,536-byte framing.
 
+use crate::auth::{process_groups, PeerPolicy};
 use crate::manager::VmManager;
 use crate::rpc::{
     encode_error_frame, encode_success_frame, error_code, parse_request_line, RpcCall, RpcError,
@@ -21,17 +22,25 @@ use tokio::sync::{watch, Mutex};
 pub struct BoundRpcServer {
     socket_path: PathBuf,
     listener: UnixListener,
-    allowed_uid: u32,
+    policy: PeerPolicy,
     /// Held open for the lifetime of the server to keep the exclusive `flock`.
     _lock_file: File,
 }
 
 impl BoundRpcServer {
-    /// Bind the Unix domain socket at `socket_path` with mode `0600` (parent dir `0700`).
+    /// Bind the Unix domain socket at `socket_path`.
+    ///
+    /// Without a control group the socket is `0600` in a `0700` parent. With one
+    /// (`policy.gid`), both are group-owned by it: socket `0660`, parent `0750`.
     ///
     /// Serializes startup with `flock(LOCK_EX | LOCK_NB)` and only unlinks an existing
     /// socket file after proving it is a real Unix socket and no live daemon accepts connections.
-    pub fn bind(socket_path: impl AsRef<Path>, allowed_uid: u32) -> Result<Self, String> {
+    pub fn bind(socket_path: impl AsRef<Path>, policy: PeerPolicy) -> Result<Self, String> {
+        let (dir_mode, sock_mode) = if policy.gid.is_some() {
+            (0o750, 0o660)
+        } else {
+            (0o700, 0o600)
+        };
         let socket_path = socket_path.as_ref().to_path_buf();
         let parent = socket_path
             .parent()
@@ -44,8 +53,12 @@ impl BoundRpcServer {
         }
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create socket parent directory: {e}"))?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("failed to set socket parent directory mode 0700: {e}"))?;
+        if let Some(gid) = policy.gid {
+            std::os::unix::fs::chown(parent, None, Some(gid))
+                .map_err(|e| format!("failed to set socket parent directory group: {e}"))?;
+        }
+        fs::set_permissions(parent, fs::Permissions::from_mode(dir_mode))
+            .map_err(|e| format!("failed to set socket parent directory mode {dir_mode:o}: {e}"))?;
 
         let lock_path = parent.join("vmm-daemon.lock");
         let lock_file = OpenOptions::new()
@@ -105,13 +118,17 @@ impl BoundRpcServer {
 
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| format!("failed to bind Unix socket: {e}"))?;
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("failed to set Unix socket mode 0600: {e}"))?;
+        if let Some(gid) = policy.gid {
+            std::os::unix::fs::chown(&socket_path, None, Some(gid))
+                .map_err(|e| format!("failed to set Unix socket group: {e}"))?;
+        }
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(sock_mode))
+            .map_err(|e| format!("failed to set Unix socket mode {sock_mode:o}: {e}"))?;
 
         Ok(Self {
             socket_path,
             listener,
-            allowed_uid,
+            policy,
             _lock_file: lock_file,
         })
     }
@@ -136,7 +153,7 @@ impl BoundRpcServer {
                 accepted = self.listener.accept() => {
                     match accepted {
                         Ok((stream, _addr)) => {
-                            if !authorize_peer(&stream, self.allowed_uid) {
+                            if !authorize_peer(&stream, &self.policy) {
                                 drop(stream);
                                 continue;
                             }
@@ -163,11 +180,19 @@ impl Drop for BoundRpcServer {
     }
 }
 
-/// Enforce `SO_PEERCRED` peer UID authorization (`ARCHITECTURE.md`: UID 0 in production).
-fn authorize_peer(stream: &UnixStream, allowed_uid: u32) -> bool {
-    match stream.peer_cred() {
-        Ok(cred) => cred.uid() == allowed_uid,
-        Err(_) => false,
+/// Enforce `SO_PEERCRED` authorization (`ARCHITECTURE.md`, socket authorization).
+/// Supplementary groups are read from `/proc/<pid>/status` only when the UID and
+/// primary GID alone do not decide.
+fn authorize_peer(stream: &UnixStream, policy: &PeerPolicy) -> bool {
+    let Ok(cred) = stream.peer_cred() else {
+        return false;
+    };
+    if policy.allows(cred.uid(), cred.gid(), &[]) {
+        return true;
+    }
+    match (policy.gid, cred.pid()) {
+        (Some(_), Some(pid)) => policy.allows(cred.uid(), cred.gid(), &process_groups(pid)),
+        _ => false,
     }
 }
 
@@ -326,10 +351,27 @@ async fn dispatch_call(manager: &Arc<VmManager>, id: &str, call: RpcCall) -> Vec
                 Err(err) => encode_error_frame(Some(id), &err),
             }
         }
-        RpcCall::ListVms(_) => match manager.list_vms().await {
-            Ok(list) => encode_or_error(id, &list),
-            Err(err) => encode_error_frame(Some(id), &err),
-        },
+        RpcCall::ListVms(_) => respond(id, manager.list_vms().await),
+        RpcCall::ListSnapshots(p) => respond(id, manager.list_snapshots(&p.vm_id).await),
+        RpcCall::RestoreSnapshot(p) => {
+            respond(id, manager.restore_snapshot(&p.vm_id, &p.snapshot_id).await)
+        }
+        RpcCall::DeleteSnapshot(p) => {
+            respond(id, manager.delete_snapshot(&p.vm_id, &p.snapshot_id).await)
+        }
+        RpcCall::StartCapture(p) => respond(id, manager.start_capture(&p.vm_id).await),
+        RpcCall::StopCapture(p) => respond(id, manager.stop_capture(&p.vm_id).await),
+        RpcCall::ListCaptures(p) => respond(id, manager.list_captures(&p.vm_id).await),
+        RpcCall::DeleteCapture(p) => {
+            respond(id, manager.delete_capture(&p.vm_id, &p.capture_id).await)
+        }
+    }
+}
+
+fn respond<T: serde::Serialize>(id: &str, result: Result<T, RpcError>) -> Vec<u8> {
+    match result {
+        Ok(value) => encode_or_error(id, &value),
+        Err(err) => encode_error_frame(Some(id), &err),
     }
 }
 

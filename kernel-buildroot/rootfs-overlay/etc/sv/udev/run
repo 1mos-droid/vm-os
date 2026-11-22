@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+/sbin/udevd &
+pid=$!
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'exit 0' TERM INT
+while [ ! -S /run/udev/control ]; do
+    kill -0 "$pid"
+    sleep 1
+done
+udevadm trigger --action=add
+udevadm settle
+touch /run/hyperos/ready/udev
+wait "$pid"

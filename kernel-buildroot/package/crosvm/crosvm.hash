@@ -1,0 +1,5 @@
+# SHA-256 of the upstream archives at the pinned revisions.
+sha256  be4c460bec6fa2061a09f8f3dd7d3aa3aa9d642c6915c81753eff543869db9a3  c41a3d34c2a0074262ae7f4630a5b45f7cb586ad.tar.gz
+sha256  1fff1ac863c50b36f60edda0b4e15826edaf3d120ecb6725e556971e861b423d  7845d89927a82dbdcdee6276837cd0978f69ba19.tar.gz
+sha256  c1d1dea1a52ff09809c990efd95cbcd0dd98f9bd52a58d5c09cfbac218e32511  LICENSE
+sha256  dc1433a79c832fe103c3eec62610d3e530cdbb6ab60a9c0dfb165e0edd8f2fbb  third_party/minijail/LICENSE

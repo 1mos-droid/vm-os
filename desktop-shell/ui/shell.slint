@@ -1,12 +1,32 @@
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 export struct SpacePill {
     vm-id: string,
     name: string,
     ram-label: string,
+    network-badge: string,
+    disposable: bool,
+    capturing: bool,
     accent: color,
     active: bool,
     running: bool,
+}
+
+export struct ShellSnapshotItem {
+    snapshot-id: string,
+    short-id: string,
+    vm-id: string,
+    created-at: string,
+    can-restore: bool,
+}
+
+export struct ShellCaptureItem {
+    capture-id: string,
+    short-id: string,
+    vm-id: string,
+    started-at: string,
+    state: string,
+    bytes-label: string,
 }
 
 export struct ShellWindowCard {
@@ -30,13 +50,54 @@ export struct DeckResultItem {
     accent: color,
 }
 
+export global Theme {
+    in-out property <string> id: "obsidian";
+    in-out property <string> name: "HyperOS Obsidian";
+    in-out property <string> layout-preset: "compact";
+    in-out property <int> density-level: 0;
+
+    in-out property <color> window-bg: #090d16;
+    in-out property <color> canvas-bg: #0f172a;
+    in-out property <color> surface-bg: #111827;
+    in-out property <color> surface-elevated: #162033;
+    in-out property <color> border: #243247;
+    in-out property <color> text-primary: #f8fafc;
+    in-out property <color> text-secondary: #cbd5e1;
+    in-out property <color> text-muted: #94a3b8;
+    in-out property <color> accent: #06b6d4;
+    in-out property <color> danger: #ef4444;
+    in-out property <color> success: #10b981;
+
+    in-out property <string> ui-font-family: "DejaVu Sans";
+    in-out property <string> mono-font-family: "DejaVu Sans Mono";
+    in-out property <length> font-base: 12px;
+    in-out property <length> font-heading: 18px;
+
+    in-out property <length> radius-sm: 8px;
+    in-out property <length> radius-md: 10px;
+    in-out property <length> radius-lg: 16px;
+    in-out property <length> radius-pill: 15px;
+
+    in-out property <length> space-xs: 6px;
+    in-out property <length> space-sm: 8px;
+    in-out property <length> space-md: 12px;
+    in-out property <length> space-lg: 16px;
+
+    public function sync-palette(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+}
+
 export component HyperShellWindow inherits Window {
     title: "HyperOS — Workspace-First Desktop Shell";
     preferred-width: 1280px;
     preferred-height: 760px;
     min-width: 960px;
     min-height: 600px;
-    background: #090d16;
+    default-font-family: Theme.ui-font-family;
+    default-font-size: Theme.font-base;
+    background: Theme.window-bg;
+    init => { Palette.color-scheme = ColorScheme.dark; }
 
     // Top Context Rail properties
     in property <[SpacePill]> space-pills: [];
@@ -51,14 +112,39 @@ export component HyperShellWindow inherits Window {
     in property <int> display-scale-pct: 100;
     in property <bool> global-offline-shield: false;
     in property <string> rail-toast: "";
+    in property <bool> vmm-connected: true;
+    in property <string> vmm-error: "";
 
     // Compositor window surfaces (2px colored origin border + subtle origin badge)
     in property <[ShellWindowCard]> windows: [];
 
-    // Super-key Action Deck overlay
+    // Super-key Action Deck overlay & Active Space Research Controls
     in-out property <bool> action-deck-visible: false;
     in-out property <string> deck-query: "";
+    in-out property <bool> deck-launch-disposable: false;
     in property <[DeckResultItem]> deck-results: [];
+    in property <string> selected-vm-id: "";
+    in property <string> selected-vm-name: "";
+    in property <string> selected-vm-state: "";
+    in property <string> selected-vm-network-badge: "";
+    in property <bool> selected-vm-disposable: false;
+    in property <bool> selected-capture-supported: false;
+    in property <bool> selected-capture-active: false;
+    in property <string> selected-capture-status: "Capture Idle";
+    in property <[ShellSnapshotItem]> selected-snapshots: [];
+    in property <[ShellCaptureItem]> selected-captures: [];
+
+    // Mandatory confirmation modals (hard power-off & snapshot restore overwrite)
+    in-out property <bool> confirm-stop-visible: false;
+    in-out property <string> confirm-stop-vm-id: "";
+    in-out property <string> confirm-stop-vm-name: "";
+    in-out property <bool> confirm-stop-vm-disposable: false;
+
+    in-out property <bool> confirm-restore-visible: false;
+    in-out property <string> confirm-restore-vm-id: "";
+    in-out property <string> confirm-restore-vm-name: "";
+    in-out property <string> confirm-restore-snap-id: "";
+    in-out property <string> confirm-restore-short-id: "";
 
     // Callbacks wired in Rust (Smithay + VMM JSON-RPC bridge)
     callback toggle-action-deck();
@@ -68,6 +154,14 @@ export component HyperShellWindow inherits Window {
     callback reclaim-ram-clicked();
     callback launch-preset(string);
     callback activate-deck-entry(string);
+    callback start-vm-action(string);
+    callback confirm-stop-vm-action(string);
+    callback snapshot-vm-action(string);
+    callback confirm-restore-snapshot-action(string, string);
+    callback delete-snapshot-action(string, string);
+    callback start-capture-action(string);
+    callback stop-capture-action(string);
+    callback delete-capture-action(string, string);
     callback focus-window(int);
     callback snap-window-action(int, string);
     callback toggle-wifi();
@@ -93,23 +187,23 @@ export component HyperShellWindow inherits Window {
             y: 46px;
             width: parent.width;
             height: parent.height - 46px;
-            background: @linear-gradient(155deg, #090d16 0%, #0f172a 55%, #0c1322 100%);
+            background: @linear-gradient(155deg, Theme.window-bg 0%, Theme.canvas-bg 55%, Theme.window-bg 100%);
 
             // Subtle ambient workspace hint when no windows are open
             if root.windows.length == 0 : VerticalLayout {
                 alignment: center;
-                spacing: 10px;
+                spacing: Theme.space-md;
                 Text {
                     text: "HyperOS Workspace-First Shell";
-                    color: #94a3b8;
-                    font-size: 20px;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-heading;
                     font-weight: 700;
                     horizontal-alignment: center;
                 }
                 Text {
                     text: "Press Super for the Action Deck or click + New Space in the Top Context Rail.";
-                    color: #64748b;
-                    font-size: 13px;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-base;
                     horizontal-alignment: center;
                 }
             }
@@ -120,8 +214,8 @@ export component HyperShellWindow inherits Window {
                 y: win.y - 46px - 2px;
                 width: win.width + 4px;
                 height: win.height + 4px;
-                border-radius: 10px;
-                background: #0f172a;
+                border-radius: Theme.radius-md;
+                background: Theme.canvas-bg;
                 border-width: 2px;
                 border-color: win.accent;
 
@@ -135,18 +229,18 @@ export component HyperShellWindow inherits Window {
                     y: 2px;
                     width: parent.width - 4px;
                     height: 34px;
-                    background: #111827;
-                    border-top-left-radius: 8px;
-                    border-top-right-radius: 8px;
+                    background: Theme.surface-bg;
+                    border-top-left-radius: Theme.radius-sm;
+                    border-top-right-radius: Theme.radius-sm;
 
                     HorizontalLayout {
                         padding-left: 10px;
                         padding-right: 10px;
-                        spacing: 8px;
+                        spacing: Theme.space-sm;
                         alignment: space-between;
 
                         HorizontalLayout {
-                            spacing: 8px;
+                            spacing: Theme.space-sm;
                             // Subtle colored origin badge pill
                             Rectangle {
                                 height: 22px;
@@ -167,8 +261,8 @@ export component HyperShellWindow inherits Window {
                             }
                             Text {
                                 text: win.title;
-                                color: #f8fafc;
-                                font-size: 12px;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-base;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
@@ -208,23 +302,23 @@ export component HyperShellWindow inherits Window {
                     y: 36px;
                     width: parent.width - 4px;
                     height: parent.height - 38px;
-                    background: #0b1120;
-                    border-bottom-left-radius: 8px;
-                    border-bottom-right-radius: 8px;
+                    background: Theme.canvas-bg;
+                    border-bottom-left-radius: Theme.radius-sm;
+                    border-bottom-right-radius: Theme.radius-sm;
 
                     VerticalLayout {
                         alignment: center;
-                        spacing: 6px;
+                        spacing: Theme.space-xs;
                         Text {
                             text: win.title;
-                            color: #e2e8f0;
+                            color: Theme.text-secondary;
                             font-size: 16px;
                             font-weight: 600;
                             horizontal-alignment: center;
                         }
                         Text {
                             text: "Origin: " + win.badge-label + (win.snap-label != "" ? "  •  Snapped: " + win.snap-label : "");
-                            color: #64748b;
+                            color: Theme.text-muted;
                             font-size: 11px;
                             horizontal-alignment: center;
                         }
@@ -239,29 +333,29 @@ export component HyperShellWindow inherits Window {
             y: 0px;
             width: parent.width;
             height: 46px;
-            background: #0b1220;
+            background: Theme.window-bg;
             border-width: 1px;
-            border-color: #1e293b;
+            border-color: Theme.border;
 
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                spacing: 8px;
+                spacing: Theme.space-sm;
                 alignment: space-between;
 
                 // Left: Action Deck trigger + VM Space Pills + "+ New Space"
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: Theme.space-xs;
                     alignment: start;
 
                     // Super Action Deck pill
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: root.action-deck-visible ? #06b6d4 : #1e293b;
+                        border-radius: Theme.radius-pill;
+                        background: root.action-deck-visible ? Theme.accent : Theme.surface-elevated;
                         border-width: 1px;
-                        border-color: root.action-deck-visible ? #22d3ee : #334155;
+                        border-color: root.action-deck-visible ? Theme.accent : Theme.border;
 
                         TouchArea {
                             clicked => { root.toggle-action-deck(); }
@@ -272,8 +366,8 @@ export component HyperShellWindow inherits Window {
                             padding-right: 12px;
                             Text {
                                 text: "◈ Deck";
-                                color: root.action-deck-visible ? #090d16 : #f8fafc;
-                                font-size: 12px;
+                                color: root.action-deck-visible ? Theme.window-bg : Theme.text-primary;
+                                font-size: Theme.font-base;
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
@@ -284,10 +378,10 @@ export component HyperShellWindow inherits Window {
                     for pill in root.space-pills : Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: pill.active ? #1e293b : #111827;
+                        border-radius: Theme.radius-pill;
+                        background: pill.active ? Theme.surface-elevated : Theme.surface-bg;
                         border-width: pill.active ? 2px : 1px;
-                        border-color: pill.active ? pill.accent : #243247;
+                        border-color: pill.active ? pill.accent : Theme.border;
 
                         TouchArea {
                             clicked => { root.activate-space(pill.vm-id); }
@@ -296,7 +390,7 @@ export component HyperShellWindow inherits Window {
                         HorizontalLayout {
                             padding-left: 10px;
                             padding-right: 10px;
-                            spacing: 6px;
+                            spacing: Theme.space-xs;
 
                             Rectangle {
                                 width: 8px;
@@ -307,14 +401,55 @@ export component HyperShellWindow inherits Window {
                             }
                             Text {
                                 text: pill.name;
-                                color: #f8fafc;
-                                font-size: 12px;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-base;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
                             Text {
+                                text: pill.network-badge;
+                                color: pill.network-badge == "NAT · Internet Only" ? Theme.accent : Theme.text-muted;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            if pill.disposable : Rectangle {
+                                height: 18px;
+                                y: 6px;
+                                border-radius: 9px;
+                                background: #7c2d12;
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    Text {
+                                        text: "DISP";
+                                        color: #ffedd5;
+                                        font-size: 9px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            if pill.capturing : Rectangle {
+                                height: 18px;
+                                y: 6px;
+                                border-radius: 9px;
+                                background: #7f1d1d;
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    Text {
+                                        text: "● REC";
+                                        color: #fecaca;
+                                        font-size: 9px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Text {
                                 text: pill.ram-label;
-                                color: #94a3b8;
+                                color: Theme.text-muted;
+                                font-family: Theme.mono-font-family;
                                 font-size: 11px;
                                 vertical-alignment: center;
                             }
@@ -325,10 +460,10 @@ export component HyperShellWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: #0f2942;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.surface-elevated;
                         border-width: 1px;
-                        border-color: #0284c7;
+                        border-color: Theme.accent;
 
                         TouchArea {
                             clicked => { root.new-space-clicked(); }
@@ -339,8 +474,36 @@ export component HyperShellWindow inherits Window {
                             padding-right: 11px;
                             Text {
                                 text: "+ New Space";
-                                color: #7dd3fc;
-                                font-size: 12px;
+                                color: Theme.accent;
+                                font-size: Theme.font-base;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if !root.vmm-connected : Rectangle {
+                        height: 26px;
+                        y: 10px;
+                        border-radius: 13px;
+                        background: #450a0a;
+                        border-width: 1px;
+                        border-color: #dc2626;
+                        HorizontalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            spacing: 5px;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                y: 9px;
+                                border-radius: 4px;
+                                background: #ef4444;
+                            }
+                            Text {
+                                text: "VMM Offline";
+                                color: #fecaca;
+                                font-size: 10px;
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
@@ -383,18 +546,19 @@ export component HyperShellWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: #111827;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
 
                         HorizontalLayout {
                             padding-left: 10px;
                             padding-right: 10px;
-                            spacing: 6px;
+                            spacing: Theme.space-xs;
                             Text {
                                 text: root.host-zram-label;
-                                color: #cbd5e1;
+                                color: Theme.text-secondary;
+                                font-family: Theme.mono-font-family;
                                 font-size: 11px;
                                 font-weight: 600;
                                 vertical-alignment: center;
@@ -406,10 +570,10 @@ export component HyperShellWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: root.wifi-enabled && !root.global-offline-shield ? #111827 : #451a03;
+                        border-radius: Theme.radius-pill;
+                        background: root.wifi-enabled && !root.global-offline-shield ? Theme.surface-bg : #451a03;
                         border-width: 1px;
-                        border-color: root.wifi-enabled && !root.global-offline-shield ? #243247 : #f59e0b;
+                        border-color: root.wifi-enabled && !root.global-offline-shield ? Theme.border : #f59e0b;
 
                         TouchArea {
                             clicked => { root.toggle-wifi(); }
@@ -420,7 +584,7 @@ export component HyperShellWindow inherits Window {
                             padding-right: 9px;
                             Text {
                                 text: root.wifi-label;
-                                color: root.wifi-enabled && !root.global-offline-shield ? #cbd5e1 : #fcd34d;
+                                color: root.wifi-enabled && !root.global-offline-shield ? Theme.text-secondary : #fcd34d;
                                 font-size: 11px;
                                 vertical-alignment: center;
                             }
@@ -431,10 +595,10 @@ export component HyperShellWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: #111827;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
 
                         TouchArea {
                             clicked => { root.toggle-audio-mute(); }
@@ -445,7 +609,7 @@ export component HyperShellWindow inherits Window {
                             padding-right: 9px;
                             Text {
                                 text: root.audio-label;
-                                color: root.audio-muted ? #f87171 : #cbd5e1;
+                                color: root.audio-muted ? Theme.danger : Theme.text-secondary;
                                 font-size: 11px;
                                 vertical-alignment: center;
                             }
@@ -456,17 +620,17 @@ export component HyperShellWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         y: 8px;
-                        border-radius: 15px;
-                        background: #111827;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
 
                         HorizontalLayout {
                             padding-left: 9px;
                             padding-right: 9px;
                             Text {
                                 text: root.battery-label;
-                                color: #cbd5e1;
+                                color: Theme.text-secondary;
                                 font-size: 11px;
                                 vertical-alignment: center;
                             }
@@ -476,9 +640,43 @@ export component HyperShellWindow inherits Window {
             }
         }
 
+        // Actionable VMM socket / authorization error banner
+        if !root.vmm-connected && root.vmm-error != "" : Rectangle {
+            y: 52px;
+            x: 16px;
+            width: parent.width - 32px;
+            height: 54px;
+            border-radius: 10px;
+            background: #450a0aee;
+            border-width: 1px;
+            border-color: #dc2626;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    y: 22px;
+                    border-radius: 5px;
+                    background: #ef4444;
+                }
+                Text {
+                    text: root.vmm-error;
+                    color: #fecaca;
+                    font-size: 12px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
         // Transient notification pill below the Top Context Rail
         if root.rail-toast != "" : Rectangle {
-            y: 54px;
+            y: !root.vmm-connected && root.vmm-error != "" ? 112px : 54px;
             x: (parent.width - 440px) / 2;
             width: 440px;
             height: 32px;
@@ -510,34 +708,34 @@ export component HyperShellWindow inherits Window {
             }
 
             Rectangle {
-                width: 720px;
-                height: 520px;
+                width: 820px;
+                height: 640px;
                 x: (parent.width - self.width) / 2;
-                y: 36px;
-                border-radius: 16px;
-                background: #0f172a;
+                y: 24px;
+                border-radius: Theme.radius-lg;
+                background: Theme.canvas-bg;
                 border-width: 1px;
-                border-color: #334155;
+                border-color: Theme.border;
 
                 // Stop clicks inside the Action Deck from dismissing it
                 TouchArea {}
 
                 VerticalLayout {
-                    padding: 20px;
-                    spacing: 14px;
+                    padding: Theme.space-lg;
+                    spacing: Theme.space-sm;
 
                     // Header + Instant Search Bar
                     HorizontalLayout {
                         alignment: space-between;
                         Text {
                             text: "Action Deck";
-                            color: #f8fafc;
-                            font-size: 18px;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-heading;
                             font-weight: 700;
                         }
                         Text {
                             text: "Super to toggle  •  Esc to close";
-                            color: #64748b;
+                            color: Theme.text-muted;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -549,23 +747,31 @@ export component HyperShellWindow inherits Window {
                         edited(q) => { root.deck-query-changed(q); }
                     }
 
-                    // One-Click Instant Environment Launchers
-                    Text {
-                        text: "INSTANT ENVIRONMENTS";
-                        color: #94a3b8;
-                        font-size: 11px;
-                        font-weight: 700;
+                    // One-Click Instant Environment Launchers + Disposable Toggle
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "INSTANT ENVIRONMENTS";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        CheckBox {
+                            text: "Disposable (reset disk on stop)";
+                            checked <=> root.deck-launch-disposable;
+                        }
                     }
 
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: Theme.space-sm;
 
                         // Disposable Browser
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
-                            border-radius: 10px;
-                            background: #111827;
+                            height: 76px;
+                            border-radius: Theme.radius-md;
+                            background: Theme.surface-bg;
                             border-width: 1px;
                             border-color: #06b6d4;
 
@@ -574,17 +780,17 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Disposable Browser";
-                                    color: #67e8f9;
+                                    color: Theme.accent;
                                     font-size: 13px;
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Safe Web · Self-destructs on close";
-                                    color: #94a3b8;
+                                    text: "NAT · Internet Only · Disposable";
+                                    color: Theme.text-muted;
                                     font-size: 11px;
                                     wrap: word-wrap;
                                 }
@@ -594,9 +800,9 @@ export component HyperShellWindow inherits Window {
                         // Work Pod
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
-                            border-radius: 10px;
-                            background: #111827;
+                            height: 76px;
+                            border-radius: Theme.radius-md;
+                            background: Theme.surface-bg;
                             border-width: 1px;
                             border-color: #10b981;
 
@@ -605,17 +811,17 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Work Pod";
-                                    color: #6ee7b7;
+                                    color: Theme.success;
                                     font-size: 13px;
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Safe Web · Daily apps & checkpoints";
-                                    color: #94a3b8;
+                                    text: "NAT · Internet Only · Daily apps";
+                                    color: Theme.text-muted;
                                     font-size: 11px;
                                     wrap: word-wrap;
                                 }
@@ -625,9 +831,9 @@ export component HyperShellWindow inherits Window {
                         // Offline Vault
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 86px;
-                            border-radius: 10px;
-                            background: #111827;
+                            height: 76px;
+                            border-radius: Theme.radius-md;
+                            background: Theme.surface-bg;
                             border-width: 1px;
                             border-color: #f59e0b;
 
@@ -636,19 +842,182 @@ export component HyperShellWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: 10px;
                                 spacing: 4px;
                                 Text {
                                     text: "Offline Vault";
-                                    color: #fcd34d;
+                                    color: Theme.text-primary;
                                     font-size: 13px;
                                     font-weight: 700;
                                 }
                                 Text {
-                                    text: "Zero Network · Air-gapped private files";
-                                    color: #94a3b8;
+                                    text: "Isolated · Offline · Air-gapped";
+                                    color: Theme.text-muted;
                                     font-size: 11px;
                                     wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Active Space Controls (Snapshots, Packet Capture, Disposable & Network Badges)
+                    if root.selected-vm-id != "" : Rectangle {
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: Theme.space-sm;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                spacing: Theme.space-sm;
+
+                                HorizontalLayout {
+                                    spacing: Theme.space-xs;
+                                    Text {
+                                        text: "Space: " + root.selected-vm-name;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-base;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: Theme.surface-elevated;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.selected-vm-state;
+                                                color: Theme.text-secondary;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: root.selected-vm-network-badge == "NAT · Internet Only" ? #083344 : #1e293b;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.selected-vm-network-badge;
+                                                color: root.selected-vm-network-badge == "NAT · Internet Only" ? #67e8f9 : #cbd5e1;
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if root.selected-vm-disposable : Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: #7c2d12;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: "DISPOSABLE";
+                                                color: #ffedd5;
+                                                font-size: 10px;
+                                                font-weight: 800;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: root.selected-capture-status;
+                                    color: root.selected-capture-active ? Theme.success : Theme.text-muted;
+                                    font-family: Theme.mono-font-family;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.space-xs;
+                                if root.selected-vm-state != "running" : Button {
+                                    text: "Open Space";
+                                    clicked => { root.start-vm-action(root.selected-vm-id); }
+                                }
+                                if root.selected-vm-state == "running" || root.selected-vm-state == "paused" : Button {
+                                    text: "Force Close";
+                                    clicked => {
+                                        root.confirm-stop-vm-id = root.selected-vm-id;
+                                        root.confirm-stop-vm-name = root.selected-vm-name;
+                                        root.confirm-stop-vm-disposable = root.selected-vm-disposable;
+                                        root.confirm-stop-visible = true;
+                                    }
+                                }
+                                if !root.selected-capture-active : Button {
+                                    text: "● Start Capture";
+                                    enabled: root.selected-vm-state == "running" && root.selected-capture-supported;
+                                    clicked => { root.start-capture-action(root.selected-vm-id); }
+                                }
+                                if root.selected-capture-active : Button {
+                                    text: "■ Stop Capture";
+                                    clicked => { root.stop-capture-action(root.selected-vm-id); }
+                                }
+                                Button {
+                                    text: "Save Snapshot";
+                                    enabled: root.selected-vm-state == "stopped" && !root.selected-vm-disposable;
+                                    clicked => { root.snapshot-vm-action(root.selected-vm-id); }
+                                }
+                            }
+
+                            for snap in root.selected-snapshots : HorizontalLayout {
+                                alignment: space-between;
+                                spacing: Theme.space-xs;
+                                Text {
+                                    text: "Snapshot " + snap.short-id + " · " + snap.created-at;
+                                    color: Theme.text-secondary;
+                                    font-family: Theme.mono-font-family;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Button {
+                                        text: "↺ Restore";
+                                        enabled: snap.can-restore;
+                                        clicked => {
+                                            root.confirm-restore-vm-id = snap.vm-id;
+                                            root.confirm-restore-vm-name = root.selected-vm-name;
+                                            root.confirm-restore-snap-id = snap.snapshot-id;
+                                            root.confirm-restore-short-id = snap.short-id;
+                                            root.confirm-restore-visible = true;
+                                        }
+                                    }
+                                    Button {
+                                        text: "Delete";
+                                        clicked => { root.delete-snapshot-action(snap.vm-id, snap.snapshot-id); }
+                                    }
+                                }
+                            }
+
+                            for cap in root.selected-captures : HorizontalLayout {
+                                alignment: space-between;
+                                spacing: Theme.space-xs;
+                                Text {
+                                    text: "Capture " + cap.short-id + " [" + cap.state + "] · " + cap.bytes-label + " · " + cap.started-at;
+                                    color: Theme.text-secondary;
+                                    font-family: Theme.mono-font-family;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Delete";
+                                    enabled: cap.state != "running";
+                                    clicked => { root.delete-capture-action(cap.vm-id, cap.capture-id); }
                                 }
                             }
                         }
@@ -658,15 +1027,15 @@ export component HyperShellWindow inherits Window {
                     ScrollView {
                         vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 6px;
+                            spacing: Theme.space-xs;
                             alignment: start;
 
                             for item in root.deck-results : Rectangle {
                                 height: 48px;
-                                border-radius: 8px;
-                                background: #162033;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.surface-elevated;
                                 border-width: 1px;
-                                border-color: #243247;
+                                border-color: Theme.border;
 
                                 TouchArea {
                                     clicked => { root.activate-deck-entry(item.entry-id); }
@@ -691,13 +1060,13 @@ export component HyperShellWindow inherits Window {
                                             alignment: center;
                                             Text {
                                                 text: item.title;
-                                                color: #f8fafc;
+                                                color: Theme.text-primary;
                                                 font-size: 13px;
                                                 font-weight: 600;
                                             }
                                             Text {
                                                 text: item.subtitle;
-                                                color: #94a3b8;
+                                                color: Theme.text-muted;
                                                 font-size: 11px;
                                             }
                                         }
@@ -705,7 +1074,7 @@ export component HyperShellWindow inherits Window {
 
                                     Text {
                                         text: item.category;
-                                        color: #64748b;
+                                        color: Theme.text-muted;
                                         font-size: 11px;
                                         font-weight: 600;
                                         vertical-alignment: center;
@@ -718,27 +1087,27 @@ export component HyperShellWindow inherits Window {
                     // Quick Hardware Toggles Row
                     Rectangle {
                         height: 48px;
-                        border-radius: 10px;
-                        background: #111827;
+                        border-radius: Theme.radius-md;
+                        background: Theme.surface-bg;
                         border-width: 1px;
-                        border-color: #243247;
+                        border-color: Theme.border;
 
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 12px;
-                            spacing: 8px;
+                            spacing: Theme.space-sm;
                             alignment: space-between;
 
                             Text {
                                 text: "Quick Hardware";
-                                color: #94a3b8;
+                                color: Theme.text-muted;
                                 font-size: 11px;
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
 
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: Theme.space-sm;
                                 Button {
                                     text: root.wifi-enabled ? "Wi-Fi: On" : "Wi-Fi: Off";
                                     primary: root.wifi-enabled;
@@ -758,6 +1127,104 @@ export component HyperShellWindow inherits Window {
                                     primary: root.global-offline-shield;
                                     clicked => { root.toggle-offline-shield(); }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= HARD POWER-OFF WARNING MODAL =================
+        if root.confirm-stop-visible : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #020617cc;
+
+            TouchArea {}
+
+            Rectangle {
+                width: 480px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius-md;
+                background: Theme.surface-bg;
+                border-width: 2px;
+                border-color: Theme.danger;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: Theme.space-md;
+                    Text { text: "Hard Power-Off Warning"; color: Theme.danger; font-size: 16px; font-weight: 700; }
+                    Text {
+                        text: "Force closing \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately powers off the Space without a graceful shutdown. Unsaved guest data may be lost.";
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    if root.confirm-stop-vm-disposable : Text {
+                        text: "This Space is DISPOSABLE — its writable CoW disk will be permanently discarded on stop.";
+                        color: Theme.danger;
+                        font-size: Theme.font-base;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        Button { text: "Cancel"; clicked => { root.confirm-stop-visible = false; } }
+                        Button {
+                            text: "Force Close Space";
+                            primary: true;
+                            clicked => {
+                                root.confirm-stop-visible = false;
+                                root.confirm-stop-vm-action(root.confirm-stop-vm-id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= SNAPSHOT RESTORE DATA-LOSS MODAL =================
+        if root.confirm-restore-visible : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #020617cc;
+
+            TouchArea {}
+
+            Rectangle {
+                width: 480px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius-md;
+                background: Theme.surface-bg;
+                border-width: 2px;
+                border-color: #f59e0b;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: Theme.space-md;
+                    Text { text: "Restore Snapshot Warning"; color: Theme.text-primary; font-size: 16px; font-weight: 700; }
+                    Text {
+                        text: "Restoring snapshot " + root.confirm-restore-short-id + " on \"" + root.confirm-restore-vm-name + "\" replaces its current disk atomically. All current disk changes since that snapshot will be permanently lost.";
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        Button { text: "Cancel"; clicked => { root.confirm-restore-visible = false; } }
+                        Button {
+                            text: "Restore Snapshot";
+                            primary: true;
+                            clicked => {
+                                root.confirm-restore-visible = false;
+                                root.confirm-restore-snapshot-action(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
                             }
                         }
                     }
