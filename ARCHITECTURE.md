@@ -205,7 +205,7 @@ CoW. Stage create/snapshot operations and commit atomically; recover interrupted
 staging on startup. Never delete a base referenced by an instance/snapshot. No
 service formats disks on boot. A failed data mount blocks daemon startup.
 
-## Contract v2 additions (proposed, pending maintainer approval)
+## Contract v2 additions (approved 2026-11-22)
 
 This section is the A0 step of [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md).
 Everything above describes v1 as implemented. Once approved, implementers code

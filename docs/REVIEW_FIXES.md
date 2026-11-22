@@ -64,7 +64,7 @@ BIOS-only, ext4 root, no initramfs) is **already fixed** in this commit.
 
 ### A0. Contract PR (do this first; it unblocks the others)
 
-**Status:** drafted as "Contract v2 additions" in `ARCHITECTURE.md`; waiting for maintainer approval.
+**Status:** approved 2026-11-22 ("Contract v2 additions" in `ARCHITECTURE.md`).
 
 Propose all API changes for phases 2–3 in one `ARCHITECTURE.md` PR, and have the
 maintainer approve it before implementing. It must define:
@@ -247,6 +247,6 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 ### Progress
 
 - [x] Docs match the code (this commit)
-- [ ] A0 (drafted, awaiting approval) · [x] A1 · [ ] A2 · [ ] A3 · [ ] A4 · [ ] A5
+- [x] A0 (approved 2026-11-22) · [x] A1 · [ ] A2 · [ ] A3 · [ ] A4 · [ ] A5
 - [ ] B1 · [ ] B2 · [ ] B3 · [ ] B4 · [ ] B5 · [ ] B6
 - [ ] C1 · [ ] C2 · [ ] C3 · [ ] C4 · [ ] C5
