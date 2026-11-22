@@ -105,8 +105,11 @@ br = config(ext / 'configs/hyperos_x86_64_defconfig', 'BR2_')
 kernel = config(ext / 'kernel/hyperos.config', 'CONFIG_')
 busybox = config(ext / 'configs/busybox.fragment', 'CONFIG_')
 
-for symbol in ('BR2_x86_64', 'BR2_TOOLCHAIN_BUILDROOT_MUSL', 'BR2_INIT_NONE',
-               'BR2_SYSTEM_BIN_SH_DASH', 'BR2_LINUX_KERNEL_INSTALL_TARGET',
+for symbol in ('BR2_x86_64', 'BR2_x86_corei7', 'BR2_CCACHE',
+               'BR2_TOOLCHAIN_EXTERNAL', 'BR2_TOOLCHAIN_EXTERNAL_BOOTLIN',
+               'BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_X86_64_CORE_I7_MUSL_STABLE',
+               'BR2_INIT_NONE', 'BR2_SYSTEM_BIN_SH_DASH',
+               'BR2_LINUX_KERNEL_INSTALL_TARGET',
                'BR2_PACKAGE_BUSYBOX', 'BR2_PACKAGE_RUNIT', 'BR2_PACKAGE_VMM_DAEMON',
                'BR2_PACKAGE_BTRFS_PROGS', 'BR2_PACKAGE_IPROUTE2', 'BR2_PACKAGE_NFTABLES',
                'BR2_PACKAGE_UTIL_LINUX', 'BR2_PACKAGE_UTIL_LINUX_BINARIES',
@@ -114,8 +117,7 @@ for symbol in ('BR2_x86_64', 'BR2_TOOLCHAIN_BUILDROOT_MUSL', 'BR2_INIT_NONE',
                'BR2_TARGET_GRUB2_I386_PC', 'BR2_TARGET_GRUB2_X86_64_EFI',
                'BR2_TARGET_ROOTFS_EROFS', 'BR2_PACKAGE_HOST_DOSFSTOOLS',
                'BR2_PACKAGE_HOST_MTOOLS', 'BR2_PACKAGE_HOST_GENIMAGE',
-               'BR2_PACKAGE_HOST_BTRFS_PROGS', 'BR2_PACKAGE_HOST_ZSTD',
-               'BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12'):
+               'BR2_PACKAGE_HOST_BTRFS_PROGS', 'BR2_PACKAGE_HOST_ZSTD'):
     require(br.get(symbol) == 'y', f'{symbol} must be enabled')
 
 for symbol in ('KVM', 'KVM_INTEL', 'KVM_AMD', 'ZRAM', 'ZRAM_BACKEND_ZSTD', 'KSM',

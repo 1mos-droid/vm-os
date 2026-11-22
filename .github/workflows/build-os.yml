@@ -10,7 +10,17 @@ concurrency:
   group: hyperos-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate source configuration
+        run: scripts/validate-configs.sh
+
   build:
+    needs: validate
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -20,10 +30,10 @@ jobs:
       # Use Buildroot's pinned CMake; CMake 4 rejects older bundled projects.
       BR2_CMAKE_CANDIDATES: ""
       BR2_DL_DIR: ${{ github.workspace }}/dl
+      BR2_CCACHE_DIR: ${{ github.workspace }}/.buildroot-ccache
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
     steps:
       - uses: actions/checkout@v4
-      - name: Validate source configuration
-        run: scripts/validate-configs.sh
       - name: Install Rust toolchain (musl target for vmm-daemon)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -32,12 +42,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex cpio rsync file wget unzip python3 libncurses-dev libssl-dev
-      - uses: actions/cache@v4
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
         with:
-          path: dl
-          key: buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/**', 'vmm-daemon/Cargo.lock') }}
+          path: ${{ env.BR2_DL_DIR }}
+          key: buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/configs/**', 'kernel-buildroot/kernel/**', 'kernel-buildroot/package/**') }}
           restore-keys: |
             buildroot-dl-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-
+      - name: Cache Buildroot ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BR2_CCACHE_DIR }}
+          key: buildroot-ccache-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/configs/**', 'kernel-buildroot/kernel/**') }}-${{ github.run_id }}
+          restore-keys: |
+            buildroot-ccache-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-${{ hashFiles('kernel-buildroot/configs/**', 'kernel-buildroot/kernel/**') }}-
+            buildroot-ccache-${{ runner.os }}-${{ env.BUILDROOT_VERSION }}-
+      - name: Cache Rust cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ env.CARGO_TARGET_DIR }}
+          key: cargo-${{ runner.os }}-musl-${{ hashFiles('vmm-daemon/Cargo.lock', 'vmm-daemon/Cargo.toml', 'vmm-daemon/src/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-musl-${{ hashFiles('vmm-daemon/Cargo.lock') }}-
+            cargo-${{ runner.os }}-musl-
       - name: Fetch pinned Buildroot
         run: |
           curl --fail --location --retry 3 "https://buildroot.org/downloads/buildroot-${BUILDROOT_VERSION}.tar.xz" -o buildroot.tar.xz
@@ -49,7 +80,12 @@ jobs:
           make -C buildroot O="$GITHUB_WORKSPACE/output" BR2_EXTERNAL="$GITHUB_WORKSPACE/kernel-buildroot" hyperos_x86_64_defconfig
           scripts/validate-configs.sh --resolved-buildroot output/.config
       - name: Build kernel and hybrid bootable image
-        run: make -C buildroot O="$GITHUB_WORKSPACE/output" -j2
+        run: |
+          mkdir -p "$BR2_CCACHE_DIR" "$CARGO_TARGET_DIR"
+          make -C buildroot O="$GITHUB_WORKSPACE/output" \
+            CARGO_HOME="$HOME/.cargo" \
+            CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            -j2
       - name: Validate resolved kernel, target binaries, and hybrid image outputs
         run: |
           scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
