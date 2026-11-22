@@ -27,22 +27,26 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/assets/shell-action-deck.png" alt="Desktop shell with the Action Deck open over VM workspaces"></td>
-    <td width="50%"><img src="docs/assets/vm-studio-spaces.png" alt="VM Studio listing VMs with network and disposable badges"></td>
+    <td width="50%"><img src="docs/assets/shell-desktop.png" alt="HyperOS desktop: top bar, Space windows with coloured origin edges, and the dock"></td>
+    <td width="50%"><img src="docs/assets/vm-studio-spaces.png" alt="VM Studio listing Spaces with state, network and disposable badges"></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>Desktop shell:</b> press <kbd>Super</kbd> for the Action Deck</sub></td>
+    <td align="center"><sub><b>Desktop:</b> every window is edged in its Space's colour, drawn by the host</sub></td>
     <td align="center"><sub><b>VM Studio:</b> start, stop, snapshot and capture without a terminal</sub></td>
   </tr>
 </table>
 
 <details>
-<summary>🧙 One more: creating a disposable, internet-only VM</summary>
+<summary>🔍 More: search launcher, new-Space flow, light theme</summary>
 <br>
-<img src="docs/assets/vm-studio-create.png" alt="VM Studio Create Space wizard with NAT internet-only and disposable selected">
+<img src="docs/assets/shell-action-deck.png" alt="Search launcher opened with the Super key">
+<br><br>
+<img src="docs/assets/vm-studio-create.png" alt="Creating a disposable, internet-only Space">
+<br><br>
+<img src="docs/assets/vm-studio-settings-light.png" alt="VM Studio settings in the light theme">
 </details>
 
-<sub>Rendered from the real UI code in mock mode.</sub>
+<sub>Rendered from the real UI code in mock mode. The look comes from <a href="ui-kit/README.md">Strata</a>, HyperOS's design system, inspired by macOS, GNOME, elementary OS and Windows 11.</sub>
 
 ## ✨ What you get
 
@@ -167,6 +171,7 @@ kernel-buildroot/   Buildroot tree: kernel, initramfs, boot, packages, services
 vmm-daemon/         Rust daemon that runs crosvm VMs over a Unix-socket API
 desktop-shell/      Wayland compositor (Smithay + Slint), DRM/KMS backend
 vm-control-ui/      VM Studio GUI (Slint)
+ui-kit/             Strata design system shared by both UIs (components, Inter font)
 guest-images/       Reproducible Alpine & Debian guest builders
 scripts/            Validator, guest import, end-to-end release runner
 docs/               Plan, testing guide, proposals, images
@@ -189,4 +194,4 @@ Each commit names its author agent in a `Co-Authored-By` trailer.
 
 - **Contributing:** read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
 - **Security:** report vulnerabilities privately; see [`SECURITY.md`](SECURITY.md).
-- **License:** dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Upstream components (Linux, Buildroot, GRUB2, runit, nftables, iproute2, crosvm) keep their own licenses.
+- **License:** dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Upstream components (Linux, Buildroot, GRUB2, runit, nftables, iproute2, crosvm) keep their own licenses; the bundled Inter font is under the SIL Open Font License (`ui-kit/fonts/OFL.txt`).

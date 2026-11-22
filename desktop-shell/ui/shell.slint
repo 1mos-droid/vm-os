@@ -1,4 +1,11 @@
-import { Button, CheckBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+import {
+    Theme, Backdrop, Card, Separator, Title, Headline, Body, Caption, SectionTitle,
+    PushButton, IconButton, Chip, Switch, Segmented, Meter, Field, Tile,
+    ListGroup, ListRow, OptionCard, Toast, Sheet, Icon,
+} from "strata.slint";
+
+export { Theme }
 
 export struct SpacePill {
     vm-id: string,
@@ -50,46 +57,8 @@ export struct DeckResultItem {
     accent: color,
 }
 
-export global Theme {
-    in-out property <string> id: "obsidian";
-    in-out property <string> name: "HyperOS Obsidian";
-    in-out property <string> layout-preset: "compact";
-    in-out property <int> density-level: 0;
-
-    in-out property <color> window-bg: #090d16;
-    in-out property <color> canvas-bg: #0f172a;
-    in-out property <color> surface-bg: #111827;
-    in-out property <color> surface-elevated: #162033;
-    in-out property <color> border: #243247;
-    in-out property <color> text-primary: #f8fafc;
-    in-out property <color> text-secondary: #cbd5e1;
-    in-out property <color> text-muted: #94a3b8;
-    in-out property <color> accent: #06b6d4;
-    in-out property <color> danger: #ef4444;
-    in-out property <color> success: #10b981;
-
-    in-out property <string> ui-font-family: "DejaVu Sans";
-    in-out property <string> mono-font-family: "DejaVu Sans Mono";
-    in-out property <length> font-base: 12px;
-    in-out property <length> font-heading: 18px;
-
-    in-out property <length> radius-sm: 8px;
-    in-out property <length> radius-md: 10px;
-    in-out property <length> radius-lg: 16px;
-    in-out property <length> radius-pill: 15px;
-
-    in-out property <length> space-xs: 6px;
-    in-out property <length> space-sm: 8px;
-    in-out property <length> space-md: 12px;
-    in-out property <length> space-lg: 16px;
-
-    public function sync-palette(dark: bool) {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
-    }
-}
-
 export component HyperShellWindow inherits Window {
-    title: "HyperOS — Workspace-First Desktop Shell";
+    title: "HyperOS";
     preferred-width: 1280px;
     preferred-height: 760px;
     min-width: 960px;
@@ -97,10 +66,8 @@ export component HyperShellWindow inherits Window {
     default-font-family: Theme.ui-font-family;
     default-font-size: Theme.font-base;
     background: Theme.window-bg;
-    init => { Palette.color-scheme = ColorScheme.dark; }
 
-    // Top Context Rail properties
-    in property <[SpacePill]> space-pills: [];
+        in property <[SpacePill]> space-pills: [];
     in property <string> active-space-key: "host";
     in property <string> host-zram-label: "RAM 310 / 4096M · ZRAM 142M";
     in property <float> host-ram-ratio: 0.15;
@@ -169,6 +136,16 @@ export component HyperShellWindow inherits Window {
     callback cycle-display-scale();
     callback toggle-offline-shield();
 
+    // Geometry shared with desktop_shell::layout (TOP_RAIL_HEIGHT_PX / BOTTOM_DOCK_HEIGHT_PX).
+    property <length> bar-h: 36px;
+    property <length> dock-h: 84px;
+
+    pure function net-icon(badge: string) -> string {
+        if (badge == "NAT · Internet Only") { return "globe"; }
+        if (badge == "Host-Only · Local") { return "home"; }
+        return "lock";
+    }
+
     // Global keyboard shortcut handler (Super / Escape)
     FocusScope {
         width: 100%;
@@ -181,841 +158,628 @@ export component HyperShellWindow inherits Window {
             reject
         }
 
-        // ================= WORKSPACE CANVAS =================
-        Rectangle {
-            x: 0px;
-            y: 46px;
-            width: parent.width;
-            height: parent.height - 46px;
-            background: @linear-gradient(155deg, Theme.window-bg 0%, Theme.canvas-bg 55%, Theme.window-bg 100%);
+        // ================= DESKTOP =================
+        Backdrop {
+            width: 100%;
+            height: 100%;
+        }
 
-            // Subtle ambient workspace hint when no windows are open
-            if root.windows.length == 0 : VerticalLayout {
+        if root.windows.length == 0 : VerticalLayout {
+            y: root.bar-h;
+            height: parent.height - root.bar-h - root.dock-h;
+            alignment: center;
+            spacing: 10px;
+            HorizontalLayout {
                 alignment: center;
-                spacing: Theme.space-md;
-                Text {
-                    text: "HyperOS Workspace-First Shell";
-                    color: Theme.text-muted;
-                    font-size: Theme.font-heading;
-                    font-weight: 700;
-                    horizontal-alignment: center;
+                Tile { icon: "grid"; tile-size: 56px; }
+            }
+            Text {
+                text: "Your desktop is clear";
+                color: Theme.text-primary;
+                font-size: Theme.size-title2;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Press Super to search, or start a Space from the dock.";
+                color: Theme.text-muted;
+                font-size: Theme.size-body;
+                horizontal-alignment: center;
+            }
+        }
+
+        // ================= WINDOWS =================
+        // Origin edges are drawn here by the host, so guests cannot spoof them.
+        // Unfocused windows dim their edge so the active trust boundary stands out.
+        for win in root.windows : Rectangle {
+            x: win.x;
+            y: win.y;
+            width: win.width;
+            height: win.height;
+            border-radius: Theme.radius-md;
+            background: Theme.canvas-bg;
+            border-width: win.focused ? 2px : 1px;
+            border-color: win.focused ? win.accent : win.accent.with-alpha(0.35);
+            clip: true;
+
+            TouchArea {
+                clicked => { root.focus-window(win.window-id); }
+            }
+
+            // Header bar
+            Rectangle {
+                y: 0px;
+                height: 40px;
+                background: win.focused ? Theme.surface-elevated : Theme.surface-bg;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 6px;
+                    spacing: 10px;
+
+                    // Origin chip: who this window really belongs to.
+                    Rectangle {
+                        horizontal-stretch: 0;
+                        min-width: origin-row.min-width;
+                        preferred-width: origin-row.preferred-width;
+                        Rectangle {
+                            y: (parent.height - 24px) / 2;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: win.accent.with-alpha(win.focused ? 0.22 : 0.12);
+                            origin-row := HorizontalLayout {
+                                padding-left: 9px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    y: (parent.height - 7px) / 2;
+                                    border-radius: 3.5px;
+                                    background: win.accent;
+                                }
+                                Text {
+                                    text: win.badge-label;
+                                    color: win.focused ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: Theme.size-caption;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: win.title;
+                        color: win.focused ? Theme.text-primary : Theme.text-muted;
+                        font-size: Theme.size-body;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    IconButton {
+                        icon: "layout-left";
+                        button-size: 28px;
+                        clicked => { root.snap-window-action(win.window-id, "left-half"); }
+                    }
+                    IconButton {
+                        icon: "layout-quarter";
+                        button-size: 28px;
+                        clicked => { root.snap-window-action(win.window-id, "top-left"); }
+                    }
+                    IconButton {
+                        icon: "maximize";
+                        button-size: 28px;
+                        clicked => { root.snap-window-action(win.window-id, "full"); }
+                    }
                 }
-                Text {
-                    text: "Press Super for the Action Deck or click + New Space in the Top Context Rail.";
-                    color: Theme.text-muted;
-                    font-size: Theme.font-base;
-                    horizontal-alignment: center;
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Theme.separator;
                 }
             }
 
-            // Managed windows with 2px colored origin border + subtle top-left origin badge
-            for win in root.windows : Rectangle {
-                x: win.x - 2px;
-                y: win.y - 46px - 2px;
-                width: win.width + 4px;
-                height: win.height + 4px;
-                border-radius: Theme.radius-md;
-                background: Theme.canvas-bg;
-                border-width: 2px;
-                border-color: win.accent;
-
-                TouchArea {
-                    clicked => { root.focus-window(win.window-id); }
+            // Client surface placeholder (Smithay draws the real Wayland surface here).
+            VerticalLayout {
+                y: 40px;
+                height: parent.height - 40px;
+                alignment: center;
+                spacing: 6px;
+                Text {
+                    text: win.title;
+                    color: Theme.text-secondary;
+                    font-size: Theme.size-title3;
+                    font-weight: 600;
+                    horizontal-alignment: center;
                 }
-
-                // Subtle colored origin badge + lightweight magnetic snap controls
-                Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 34px;
-                    background: Theme.surface-bg;
-                    border-top-left-radius: Theme.radius-sm;
-                    border-top-right-radius: Theme.radius-sm;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: Theme.space-sm;
-                        alignment: space-between;
-
-                        HorizontalLayout {
-                            spacing: Theme.space-sm;
-                            // Subtle colored origin badge pill
-                            Rectangle {
-                                height: 22px;
-                                y: 6px;
-                                border-radius: 11px;
-                                background: win.accent;
-                                HorizontalLayout {
-                                    padding-left: 9px;
-                                    padding-right: 9px;
-                                    Text {
-                                        text: win.badge-label;
-                                        color: #090d16;
-                                        font-size: 10px;
-                                        font-weight: 800;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            Text {
-                                text: win.title;
-                                color: Theme.text-primary;
-                                font-size: Theme.font-base;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Magnetic half/quarter snap triggers
-                        HorizontalLayout {
-                            spacing: 4px;
-                            alignment: end;
-                            Button {
-                                text: "◧";
-                                clicked => { root.snap-window-action(win.window-id, "left-half"); }
-                            }
-                            Button {
-                                text: "◨";
-                                clicked => { root.snap-window-action(win.window-id, "right-half"); }
-                            }
-                            Button {
-                                text: "◰";
-                                clicked => { root.snap-window-action(win.window-id, "top-left"); }
-                            }
-                            Button {
-                                text: "◲";
-                                clicked => { root.snap-window-action(win.window-id, "bottom-right"); }
-                            }
-                            Button {
-                                text: "⬜";
-                                clicked => { root.snap-window-action(win.window-id, "full"); }
-                            }
-                        }
-                    }
-                }
-
-                // Client Wayland surface viewport placeholder (rendered by Smithay in KMS/Winit output)
-                Rectangle {
-                    x: 2px;
-                    y: 36px;
-                    width: parent.width - 4px;
-                    height: parent.height - 38px;
-                    background: Theme.canvas-bg;
-                    border-bottom-left-radius: Theme.radius-sm;
-                    border-bottom-right-radius: Theme.radius-sm;
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: Theme.space-xs;
-                        Text {
-                            text: win.title;
-                            color: Theme.text-secondary;
-                            font-size: 16px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Origin: " + win.badge-label + (win.snap-label != "" ? "  •  Snapped: " + win.snap-label : "");
-                            color: Theme.text-muted;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                        }
-                    }
+                Text {
+                    text: win.snap-label != "" ? win.badge-label + "  ·  " + win.snap-label : win.badge-label;
+                    color: Theme.text-muted;
+                    font-size: Theme.size-footnote;
+                    horizontal-alignment: center;
                 }
             }
         }
 
-        // ================= TOP CONTEXT RAIL (NO DOCK / NO MENU BAR) =================
+        // ================= TOP BAR =================
         Rectangle {
-            x: 0px;
             y: 0px;
-            width: parent.width;
-            height: 46px;
-            background: Theme.window-bg;
-            border-width: 1px;
-            border-color: Theme.border;
+            height: root.bar-h;
+            background: Theme.bar-glass;
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.separator;
+            }
 
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                spacing: Theme.space-sm;
-                alignment: space-between;
+                spacing: 4px;
 
-                // Left: Action Deck trigger + VM Space Pills + "+ New Space"
-                HorizontalLayout {
-                    spacing: Theme.space-xs;
-                    alignment: start;
-
-                    // Super Action Deck pill
+                // Search / Action Deck
+                Rectangle {
+                    horizontal-stretch: 0;
+                    min-width: deck-row.min-width;
+                    preferred-width: deck-row.preferred-width;
                     Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: root.action-deck-visible ? Theme.accent : Theme.surface-elevated;
-                        border-width: 1px;
-                        border-color: root.action-deck-visible ? Theme.accent : Theme.border;
-
-                        TouchArea {
+                        y: (parent.height - 26px) / 2;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: root.action-deck-visible ? Theme.accent-soft : deck-ta.has-hover ? Theme.fill-hover : Theme.fill-subtle;
+                        deck-row := HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 12px;
+                            spacing: 7px;
+                            Icon {
+                                name: "search";
+                                size: 14px;
+                                color: Theme.text-secondary;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: "Search";
+                                color: Theme.text-secondary;
+                                font-size: Theme.size-footnote;
+                                vertical-alignment: center;
+                            }
+                        }
+                        deck-ta := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.toggle-action-deck(); }
                         }
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            Text {
-                                text: "◈ Deck";
-                                color: root.action-deck-visible ? Theme.window-bg : Theme.text-primary;
-                                font-size: Theme.font-base;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                        }
                     }
+                }
 
-                    // Active VM Pill Tabs with live RAM readout
-                    for pill in root.space-pills : Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: pill.active ? Theme.surface-elevated : Theme.surface-bg;
-                        border-width: pill.active ? 2px : 1px;
-                        border-color: pill.active ? pill.accent : Theme.border;
+                Rectangle { width: 6px; }
 
-                        TouchArea {
-                            clicked => { root.activate-space(pill.vm-id); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: Theme.space-xs;
-
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                y: 11px;
-                                border-radius: 4px;
-                                background: pill.accent;
-                            }
-                            Text {
-                                text: pill.name;
-                                color: Theme.text-primary;
-                                font-size: Theme.font-base;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: pill.network-badge;
-                                color: pill.network-badge == "NAT · Internet Only" ? Theme.accent : Theme.text-muted;
-                                font-size: 10px;
-                                vertical-alignment: center;
-                            }
-                            if pill.disposable : Rectangle {
-                                height: 18px;
-                                y: 6px;
-                                border-radius: 9px;
-                                background: #7c2d12;
-                                HorizontalLayout {
-                                    padding-left: 6px;
-                                    padding-right: 6px;
-                                    Text {
-                                        text: "DISP";
-                                        color: #ffedd5;
-                                        font-size: 9px;
-                                        font-weight: 800;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            if pill.capturing : Rectangle {
-                                height: 18px;
-                                y: 6px;
-                                border-radius: 9px;
-                                background: #7f1d1d;
-                                HorizontalLayout {
-                                    padding-left: 6px;
-                                    padding-right: 6px;
-                                    Text {
-                                        text: "● REC";
-                                        color: #fecaca;
-                                        font-size: 9px;
-                                        font-weight: 800;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            Text {
-                                text: pill.ram-label;
-                                color: Theme.text-muted;
-                                font-family: Theme.mono-font-family;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // + New Space quick-launch button
+                // Space switcher
+                for pill in root.space-pills : Rectangle {
+                    horizontal-stretch: 0;
+                    min-width: pill-row.min-width;
+                    preferred-width: pill-row.preferred-width;
                     Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: Theme.surface-elevated;
-                        border-width: 1px;
-                        border-color: Theme.accent;
-
-                        TouchArea {
-                            clicked => { root.new-space-clicked(); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 11px;
-                            padding-right: 11px;
-                            Text {
-                                text: "+ New Space";
-                                color: Theme.accent;
-                                font-size: Theme.font-base;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    if !root.vmm-connected : Rectangle {
+                        y: (parent.height - 26px) / 2;
                         height: 26px;
-                        y: 10px;
                         border-radius: 13px;
-                        background: #450a0a;
-                        border-width: 1px;
-                        border-color: #dc2626;
-                        HorizontalLayout {
+                        background: pill.active ? pill.accent.with-alpha(0.20) : pill-ta.has-hover ? Theme.fill-hover : transparent;
+                        animate background { duration: 120ms; }
+                        pill-row := HorizontalLayout {
                             padding-left: 9px;
-                            padding-right: 9px;
-                            spacing: 5px;
+                            padding-right: 11px;
+                            spacing: 6px;
                             Rectangle {
                                 width: 7px;
                                 height: 7px;
-                                y: 9px;
-                                border-radius: 4px;
-                                background: #ef4444;
+                                y: (parent.height - 7px) / 2;
+                                border-radius: 3.5px;
+                                background: pill.running ? pill.accent : pill.accent.with-alpha(0.35);
                             }
                             Text {
-                                text: "VMM Offline";
-                                color: #fecaca;
-                                font-size: 10px;
-                                font-weight: 700;
+                                text: pill.name;
+                                color: pill.active ? Theme.text-primary : Theme.text-secondary;
+                                font-size: Theme.size-footnote;
+                                font-weight: pill.active ? 600 : 500;
                                 vertical-alignment: center;
                             }
+                            if pill.disposable : Icon {
+                                name: "hourglass";
+                                size: 12px;
+                                color: Theme.warning;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            if pill.capturing : Icon {
+                                name: "record";
+                                size: 12px;
+                                color: Theme.danger;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        pill-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.activate-space(pill.vm-id); }
                         }
                     }
                 }
 
-                // Right: Reclaim RAM + Host+ZRAM meter + Wi-Fi + Audio + Battery
+                Rectangle { horizontal-stretch: 1; }
+
+                if !root.vmm-connected : Chip {
+                    text: "VM service offline";
+                    tone: "danger";
+                    dot: true;
+                }
+
+                // Memory
+                Rectangle {
+                    horizontal-stretch: 0;
+                    min-width: mem-row.min-width;
+                    preferred-width: mem-row.preferred-width;
+                    mem-row := HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 8px;
+                        Icon {
+                            name: "chip";
+                            size: 14px;
+                            color: Theme.text-secondary;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Rectangle {
+                            width: 44px;
+                            Meter {
+                                y: (parent.height - self.height) / 2;
+                                width: parent.width;
+                                ratio: root.host-ram-ratio;
+                                fill: root.host-ram-ratio > 0.85 ? Theme.danger : root.host-ram-ratio > 0.65 ? Theme.warning : Theme.accent;
+                            }
+                        }
+                        Text {
+                            text: root.host-zram-label;
+                            color: Theme.text-muted;
+                            font-size: Theme.size-caption;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                IconButton {
+                    icon: "bolt";
+                    button-size: 28px;
+                    clicked => { root.reclaim-ram-clicked(); }
+                }
+                IconButton {
+                    icon: root.wifi-enabled && !root.global-offline-shield ? "wifi" : "wifi-off";
+                    tint: root.global-offline-shield ? Theme.warning : Theme.text-secondary;
+                    button-size: 28px;
+                    clicked => { root.toggle-wifi(); }
+                }
+                IconButton {
+                    icon: root.audio-muted ? "volume-off" : "volume";
+                    tint: root.audio-muted ? Theme.danger : Theme.text-secondary;
+                    button-size: 28px;
+                    clicked => { root.toggle-audio-mute(); }
+                }
                 HorizontalLayout {
-                    spacing: 6px;
-                    alignment: end;
-
-                    // Reclaim RAM pill (deflates idle VM balloons)
-                    Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: 15px;
-                        background: #064e3b;
-                        border-width: 1px;
-                        border-color: #10b981;
-
-                        TouchArea {
-                            clicked => { root.reclaim-ram-clicked(); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            Text {
-                                text: "⚡ Reclaim RAM";
-                                color: #a7f3d0;
-                                font-size: 11px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                        }
+                    spacing: 5px;
+                    padding-left: 4px;
+                    Icon {
+                        name: "battery";
+                        size: 15px;
+                        color: Theme.text-secondary;
+                        y: (parent.height - self.height) / 2;
                     }
-
-                    // Host + ZRAM compact meter pill
-                    Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: Theme.space-xs;
-                            Text {
-                                text: root.host-zram-label;
-                                color: Theme.text-secondary;
-                                font-family: Theme.mono-font-family;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Wi-Fi pill
-                    Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: root.wifi-enabled && !root.global-offline-shield ? Theme.surface-bg : #451a03;
-                        border-width: 1px;
-                        border-color: root.wifi-enabled && !root.global-offline-shield ? Theme.border : #f59e0b;
-
-                        TouchArea {
-                            clicked => { root.toggle-wifi(); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 9px;
-                            padding-right: 9px;
-                            Text {
-                                text: root.wifi-label;
-                                color: root.wifi-enabled && !root.global-offline-shield ? Theme.text-secondary : #fcd34d;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Audio pill
-                    Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-
-                        TouchArea {
-                            clicked => { root.toggle-audio-mute(); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 9px;
-                            padding-right: 9px;
-                            Text {
-                                text: root.audio-label;
-                                color: root.audio-muted ? Theme.danger : Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Battery pill
-                    Rectangle {
-                        height: 30px;
-                        y: 8px;
-                        border-radius: Theme.radius-pill;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-
-                        HorizontalLayout {
-                            padding-left: 9px;
-                            padding-right: 9px;
-                            Text {
-                                text: root.battery-label;
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                        }
+                    Text {
+                        text: root.battery-label;
+                        color: Theme.text-secondary;
+                        font-size: Theme.size-footnote;
+                        vertical-alignment: center;
                     }
                 }
             }
         }
 
-        // Actionable VMM socket / authorization error banner
-        if !root.vmm-connected && root.vmm-error != "" : Rectangle {
-            y: 52px;
-            x: 16px;
-            width: parent.width - 32px;
-            height: 54px;
-            border-radius: 10px;
-            background: #450a0aee;
+        // ================= DOCK =================
+        dock := Rectangle {
+            property <length> tile: 46px;
+            height: 66px;
+            width: dock-row.preferred-width;
+            x: (parent.width - self.width) / 2;
+            y: parent.height - self.height - 12px;
+            border-radius: 22px;
+            background: Theme.surface-glass;
             border-width: 1px;
-            border-color: #dc2626;
+            border-color: Theme.separator;
 
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 10px;
+            dock-row := HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                for pill in root.space-pills : Rectangle {
+                    width: dock.tile;
+                    Tile {
+                        y: 8px;
+                        icon: root.net-icon(pill.network-badge);
+                        tint: pill.accent;
+                        tile-size: dock.tile;
+                        badge: pill.disposable ? "hourglass" : "";
+                        opacity: pill.running ? 1.0 : 0.55;
+                    }
+                    if pill.running : Rectangle {
+                        y: parent.height - 5px;
+                        x: (parent.width - 4px) / 2;
+                        width: 4px;
+                        height: 4px;
+                        border-radius: 2px;
+                        background: pill.active ? Theme.text-primary : Theme.text-muted;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.activate-space(pill.vm-id); }
+                    }
+                }
+
+                if root.space-pills.length > 0 : Rectangle {
+                    width: 1px;
+                    Rectangle {
+                        y: 16px;
+                        height: parent.height - 32px;
+                        background: Theme.separator;
+                    }
+                }
 
                 Rectangle {
-                    width: 10px;
-                    height: 10px;
-                    y: 22px;
-                    border-radius: 5px;
-                    background: #ef4444;
-                }
-                Text {
-                    text: root.vmm-error;
-                    color: #fecaca;
-                    font-size: 12px;
-                    font-weight: 600;
-                    wrap: word-wrap;
-                    vertical-alignment: center;
+                    width: dock.tile;
+                    Rectangle {
+                        y: 8px;
+                        height: dock.tile;
+                        border-radius: dock.tile * 0.28;
+                        background: new-ta.has-hover ? Theme.fill-pressed : Theme.fill-hover;
+                        Icon {
+                            name: "plus";
+                            size: 22px;
+                            color: Theme.text-primary;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                    new-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.new-space-clicked(); }
+                    }
                 }
             }
         }
 
-        // Transient notification pill below the Top Context Rail
-        if root.rail-toast != "" : Rectangle {
-            y: !root.vmm-connected && root.vmm-error != "" ? 112px : 54px;
-            x: (parent.width - 440px) / 2;
-            width: 440px;
-            height: 32px;
-            border-radius: 16px;
-            background: #0f2942ee;
-            border-width: 1px;
-            border-color: #38bdf8;
-
-            Text {
-                text: root.rail-toast;
-                color: #e0f2fe;
-                font-size: 12px;
-                font-weight: 600;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+        // ================= NOTICES =================
+        if !root.vmm-connected && root.vmm-error != "" : Toast {
+            text: root.vmm-error;
+            error: true;
+            width: Math.min(640px, parent.width - 48px);
+            x: (parent.width - self.width) / 2;
+            y: root.bar-h + 12px;
         }
 
-        // ================= SUPER-KEY ACTION DECK OVERLAY =================
+        if root.rail-toast != "" : Toast {
+            text: root.rail-toast;
+            width: Math.min(480px, parent.width - 48px);
+            x: (parent.width - self.width) / 2;
+            y: root.bar-h + (!root.vmm-connected && root.vmm-error != "" ? 60px : 12px);
+        }
+
+        // ================= ACTION DECK (Super) =================
         if root.action-deck-visible : Rectangle {
-            x: 0px;
-            y: 46px;
-            width: parent.width;
-            height: parent.height - 46px;
-            background: #020617cc;
+            background: Theme.scrim;
 
             TouchArea {
                 clicked => { root.toggle-action-deck(); }
             }
 
             Rectangle {
-                width: 820px;
-                height: 640px;
+                width: Math.min(720px, parent.width - 64px);
+                height: Math.min(640px, parent.height - 120px);
                 x: (parent.width - self.width) / 2;
-                y: 24px;
-                border-radius: Theme.radius-lg;
-                background: Theme.canvas-bg;
+                y: 84px;
+                border-radius: 20px;
+                background: Theme.surface-elevated;
                 border-width: 1px;
-                border-color: Theme.border;
+                border-color: Theme.separator;
+                clip: true;
 
-                // Stop clicks inside the Action Deck from dismissing it
+                // Swallow clicks inside the deck.
                 TouchArea {}
 
-                VerticalLayout {
-                    padding: Theme.space-lg;
-                    spacing: Theme.space-sm;
+                deck-body := VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
 
-                    // Header + Instant Search Bar
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "Action Deck";
-                            color: Theme.text-primary;
-                            font-size: Theme.font-heading;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: "Super to toggle  •  Esc to close";
-                            color: Theme.text-muted;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    LineEdit {
-                        placeholder-text: "Search apps, active Spaces, or instant environments…";
+                    Field {
+                        icon: "search";
+                        placeholder: "Search Spaces, apps and actions";
+                        field-font-size: Theme.size-title3;
+                        min-height: 48px;
                         text <=> root.deck-query;
                         edited(q) => { root.deck-query-changed(q); }
                     }
 
-                    // One-Click Instant Environment Launchers + Disposable Toggle
+                    // Quick start
                     HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "INSTANT ENVIRONMENTS";
-                            color: Theme.text-muted;
-                            font-size: 11px;
-                            font-weight: 700;
+                        SectionTitle {
+                            text: "QUICK START";
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Caption {
+                            text: "Disposable";
                             vertical-alignment: center;
                         }
-                        CheckBox {
-                            text: "Disposable (reset disk on stop)";
-                            checked <=> root.deck-launch-disposable;
-                        }
+                        Rectangle { width: 8px; }
+                        Switch { checked <=> root.deck-launch-disposable; }
                     }
-
                     HorizontalLayout {
-                        spacing: Theme.space-sm;
-
-                        // Disposable Browser
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 76px;
-                            border-radius: Theme.radius-md;
-                            background: Theme.surface-bg;
-                            border-width: 1px;
-                            border-color: #06b6d4;
-
-                            TouchArea {
-                                clicked => { root.launch-preset("disposable-browser"); }
-                            }
-
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 4px;
-                                Text {
-                                    text: "Disposable Browser";
-                                    color: Theme.accent;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                }
-                                Text {
-                                    text: "NAT · Internet Only · Disposable";
-                                    color: Theme.text-muted;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                            }
+                        spacing: 10px;
+                        OptionCard {
+                            title: "Private browser";
+                            description: "Internet only";
+                            icon: "globe";
+                            tint: Theme.accent;
+                            selectable: false;
+                            clicked => { root.launch-preset("disposable-browser"); }
                         }
-
-                        // Work Pod
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 76px;
-                            border-radius: Theme.radius-md;
-                            background: Theme.surface-bg;
-                            border-width: 1px;
-                            border-color: #10b981;
-
-                            TouchArea {
-                                clicked => { root.launch-preset("work-pod"); }
-                            }
-
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 4px;
-                                Text {
-                                    text: "Work Pod";
-                                    color: Theme.success;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                }
-                                Text {
-                                    text: "NAT · Internet Only · Daily apps";
-                                    color: Theme.text-muted;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                            }
+                        OptionCard {
+                            title: "Work";
+                            description: "Internet only · daily apps";
+                            icon: "window";
+                            tint: Theme.success;
+                            selectable: false;
+                            clicked => { root.launch-preset("work-pod"); }
                         }
-
-                        // Offline Vault
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 76px;
-                            border-radius: Theme.radius-md;
-                            background: Theme.surface-bg;
-                            border-width: 1px;
-                            border-color: #f59e0b;
-
-                            TouchArea {
-                                clicked => { root.launch-preset("offline-vault"); }
-                            }
-
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 4px;
-                                Text {
-                                    text: "Offline Vault";
-                                    color: Theme.text-primary;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                }
-                                Text {
-                                    text: "Isolated · Offline · Air-gapped";
-                                    color: Theme.text-muted;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                            }
+                        OptionCard {
+                            title: "Offline vault";
+                            description: "No network at all";
+                            icon: "lock";
+                            tint: Theme.warning;
+                            selectable: false;
+                            clicked => { root.launch-preset("offline-vault"); }
                         }
                     }
 
-                    // Active Space Controls (Snapshots, Packet Capture, Disposable & Network Badges)
-                    if root.selected-vm-id != "" : Rectangle {
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
+                    ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                    spacing: 14px;
+                    alignment: start;
 
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: Theme.space-sm;
-
-                            HorizontalLayout {
-                                alignment: space-between;
-                                spacing: Theme.space-sm;
-
+                    // Selected Space
+                    if root.selected-vm-id != "" : VerticalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "CURRENT SPACE"; }
+                        ListGroup {
+                            Rectangle {
+                                min-height: 64px;
                                 HorizontalLayout {
-                                    spacing: Theme.space-xs;
-                                    Text {
-                                        text: "Space: " + root.selected-vm-name;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.font-base;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle {
-                                        height: 20px;
-                                        border-radius: 10px;
-                                        background: Theme.surface-elevated;
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            Text {
-                                                text: root.selected-vm-state;
-                                                color: Theme.text-secondary;
-                                                font-size: 10px;
-                                                vertical-alignment: center;
-                                            }
+                                    padding: 12px;
+                                    padding-left: 14px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Tile {
+                                            icon: root.net-icon(root.selected-vm-network-badge);
+                                            tile-size: 38px;
+                                            badge: root.selected-vm-disposable ? "hourglass" : "";
                                         }
                                     }
-                                    Rectangle {
-                                        height: 20px;
-                                        border-radius: 10px;
-                                        background: root.selected-vm-network-badge == "NAT · Internet Only" ? #083344 : #1e293b;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 4px;
+                                        Headline { text: root.selected-vm-name; }
                                         HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            Text {
-                                                text: root.selected-vm-network-badge;
-                                                color: root.selected-vm-network-badge == "NAT · Internet Only" ? #67e8f9 : #cbd5e1;
-                                                font-size: 10px;
-                                                font-weight: 700;
-                                                vertical-alignment: center;
+                                            spacing: 6px;
+                                            Chip {
+                                                text: root.selected-vm-state == "running" ? "Running" : root.selected-vm-state == "paused" ? "Paused" : root.selected-vm-state == "failed" ? "Failed" : "Stopped";
+                                                tone: root.selected-vm-state == "running" ? "success" : root.selected-vm-state == "paused" ? "warning" : "neutral";
+                                                dot: true;
                                             }
+                                            Chip { text: root.selected-vm-network-badge; }
+                                            Chip {
+                                                text: root.selected-capture-status;
+                                                icon: "record";
+                                                tone: root.selected-capture-active ? "danger" : "neutral";
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
                                         }
                                     }
-                                    if root.selected-vm-disposable : Rectangle {
-                                        height: 20px;
-                                        border-radius: 10px;
-                                        background: #7c2d12;
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            Text {
-                                                text: "DISPOSABLE";
-                                                color: #ffedd5;
-                                                font-size: 10px;
-                                                font-weight: 800;
-                                                vertical-alignment: center;
-                                            }
-                                        }
+                                    IconButton {
+                                        icon: "camera";
+                                        enabled: root.selected-vm-state == "stopped" && !root.selected-vm-disposable;
+                                        clicked => { root.snapshot-vm-action(root.selected-vm-id); }
                                     }
-                                }
-
-                                Text {
-                                    text: root.selected-capture-status;
-                                    color: root.selected-capture-active ? Theme.success : Theme.text-muted;
-                                    font-family: Theme.mono-font-family;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: Theme.space-xs;
-                                if root.selected-vm-state != "running" : Button {
-                                    text: "Open Space";
-                                    clicked => { root.start-vm-action(root.selected-vm-id); }
-                                }
-                                if root.selected-vm-state == "running" || root.selected-vm-state == "paused" : Button {
-                                    text: "Force Close";
-                                    clicked => {
-                                        root.confirm-stop-vm-id = root.selected-vm-id;
-                                        root.confirm-stop-vm-name = root.selected-vm-name;
-                                        root.confirm-stop-vm-disposable = root.selected-vm-disposable;
-                                        root.confirm-stop-visible = true;
-                                    }
-                                }
-                                if !root.selected-capture-active : Button {
-                                    text: "● Start Capture";
-                                    enabled: root.selected-vm-state == "running" && root.selected-capture-supported;
-                                    clicked => { root.start-capture-action(root.selected-vm-id); }
-                                }
-                                if root.selected-capture-active : Button {
-                                    text: "■ Stop Capture";
-                                    clicked => { root.stop-capture-action(root.selected-vm-id); }
-                                }
-                                Button {
-                                    text: "Save Snapshot";
-                                    enabled: root.selected-vm-state == "stopped" && !root.selected-vm-disposable;
-                                    clicked => { root.snapshot-vm-action(root.selected-vm-id); }
-                                }
-                            }
-
-                            for snap in root.selected-snapshots : HorizontalLayout {
-                                alignment: space-between;
-                                spacing: Theme.space-xs;
-                                Text {
-                                    text: "Snapshot " + snap.short-id + " · " + snap.created-at;
-                                    color: Theme.text-secondary;
-                                    font-family: Theme.mono-font-family;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    Button {
-                                        text: "↺ Restore";
-                                        enabled: snap.can-restore;
+                                    IconButton {
+                                        icon: "record";
+                                        active: root.selected-capture-active;
+                                        tint: root.selected-capture-active ? Theme.danger : Theme.text-secondary;
+                                        enabled: root.selected-capture-active || (root.selected-vm-state == "running" && root.selected-capture-supported);
                                         clicked => {
-                                            root.confirm-restore-vm-id = snap.vm-id;
-                                            root.confirm-restore-vm-name = root.selected-vm-name;
-                                            root.confirm-restore-snap-id = snap.snapshot-id;
-                                            root.confirm-restore-short-id = snap.short-id;
-                                            root.confirm-restore-visible = true;
+                                            if (root.selected-capture-active) {
+                                                root.stop-capture-action(root.selected-vm-id);
+                                            } else {
+                                                root.start-capture-action(root.selected-vm-id);
+                                            }
                                         }
                                     }
-                                    Button {
-                                        text: "Delete";
-                                        clicked => { root.delete-snapshot-action(snap.vm-id, snap.snapshot-id); }
+                                    if root.selected-vm-state == "running" || root.selected-vm-state == "paused" : PushButton {
+                                        text: "Stop";
+                                        icon: "power";
+                                        kind: "danger";
+                                        clicked => {
+                                            root.confirm-stop-vm-id = root.selected-vm-id;
+                                            root.confirm-stop-vm-name = root.selected-vm-name;
+                                            root.confirm-stop-vm-disposable = root.selected-vm-disposable;
+                                            root.confirm-stop-visible = true;
+                                        }
+                                    }
+                                    if root.selected-vm-state != "running" : PushButton {
+                                        text: "Start";
+                                        icon: "play";
+                                        kind: "primary";
+                                        clicked => { root.start-vm-action(root.selected-vm-id); }
                                     }
                                 }
-                            }
-
-                            for cap in root.selected-captures : HorizontalLayout {
-                                alignment: space-between;
-                                spacing: Theme.space-xs;
-                                Text {
-                                    text: "Capture " + cap.short-id + " [" + cap.state + "] · " + cap.bytes-label + " · " + cap.started-at;
-                                    color: Theme.text-secondary;
-                                    font-family: Theme.mono-font-family;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
+                                if root.selected-snapshots.length + root.selected-captures.length > 0 : Rectangle {
+                                    x: 14px;
+                                    y: parent.height - 1px;
+                                    width: parent.width - 14px;
+                                    height: 1px;
+                                    background: Theme.separator;
                                 }
-                                Button {
-                                    text: "Delete";
+                            }
+                            for snap[si] in root.selected-snapshots : ListRow {
+                                title: "Snapshot " + snap.short-id;
+                                subtitle: snap.created-at;
+                                icon: "camera";
+                                icon-tint: Theme.info;
+                                last: si == root.selected-snapshots.length - 1 && root.selected-captures.length == 0;
+                                PushButton {
+                                    text: "Restore";
+                                    icon: "restore";
+                                    small: true;
+                                    enabled: snap.can-restore;
+                                    clicked => {
+                                        root.confirm-restore-vm-id = snap.vm-id;
+                                        root.confirm-restore-vm-name = root.selected-vm-name;
+                                        root.confirm-restore-snap-id = snap.snapshot-id;
+                                        root.confirm-restore-short-id = snap.short-id;
+                                        root.confirm-restore-visible = true;
+                                    }
+                                }
+                                IconButton {
+                                    icon: "trash";
+                                    tint: Theme.danger;
+                                    clicked => { root.delete-snapshot-action(snap.vm-id, snap.snapshot-id); }
+                                }
+                            }
+                            for cap[ci] in root.selected-captures : ListRow {
+                                title: "Capture " + cap.short-id;
+                                subtitle: cap.started-at + "  ·  " + cap.bytes-label;
+                                icon: "record";
+                                icon-tint: cap.state == "running" ? Theme.danger : Theme.text-muted;
+                                last: ci == root.selected-captures.length - 1;
+                                Chip {
+                                    text: cap.state == "running" ? "Recording" : cap.state == "limit_reached" ? "Size limit" : "Saved";
+                                    tone: cap.state == "running" ? "danger" : cap.state == "limit_reached" ? "warning" : "success";
+                                    dot: true;
+                                }
+                                IconButton {
+                                    icon: "trash";
+                                    tint: Theme.danger;
                                     enabled: cap.state != "running";
                                     clicked => { root.delete-capture-action(cap.vm-id, cap.capture-id); }
                                 }
@@ -1023,212 +787,143 @@ export component HyperShellWindow inherits Window {
                         }
                     }
 
-                    // Searchable Apps & Spaces List
-                    ScrollView {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            spacing: Theme.space-xs;
-                            alignment: start;
-
-                            for item in root.deck-results : Rectangle {
-                                height: 48px;
-                                border-radius: Theme.radius-sm;
-                                background: Theme.surface-elevated;
-                                border-width: 1px;
-                                border-color: Theme.border;
-
-                                TouchArea {
-                                    clicked => { root.activate-deck-entry(item.entry-id); }
-                                }
-
+                    // Results
+                    if root.deck-results.length > 0 : VerticalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "RESULTS"; }
+                        ListGroup {
+                            for item[ri] in root.deck-results : Rectangle {
+                                min-height: 52px;
+                                background: res-ta.has-hover ? Theme.fill-hover : transparent;
                                 HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 12px;
-                                    spacing: 10px;
-                                    alignment: space-between;
-
-                                    HorizontalLayout {
-                                        spacing: 10px;
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
                                         Rectangle {
-                                            width: 4px;
-                                            height: 26px;
-                                            y: 11px;
-                                            border-radius: 2px;
-                                            background: item.accent;
-                                        }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Text {
-                                                text: item.title;
-                                                color: Theme.text-primary;
-                                                font-size: 13px;
-                                                font-weight: 600;
-                                            }
-                                            Text {
-                                                text: item.subtitle;
-                                                color: Theme.text-muted;
-                                                font-size: 11px;
+                                            width: 30px;
+                                            height: 30px;
+                                            border-radius: 8px;
+                                            background: item.accent.with-alpha(0.18);
+                                            Rectangle {
+                                                width: 8px;
+                                                height: 8px;
+                                                x: 11px;
+                                                y: 11px;
+                                                border-radius: 4px;
+                                                background: item.accent;
                                             }
                                         }
                                     }
-
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text {
+                                            text: item.title;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.size-body;
+                                            font-weight: 500;
+                                        }
+                                        Text {
+                                            text: item.subtitle;
+                                            color: Theme.text-muted;
+                                            font-size: Theme.size-footnote;
+                                        }
+                                    }
                                     Text {
                                         text: item.category;
                                         color: Theme.text-muted;
-                                        font-size: 11px;
-                                        font-weight: 600;
+                                        font-size: Theme.size-caption;
                                         vertical-alignment: center;
                                     }
+                                    Icon {
+                                        name: "chevron-right";
+                                        size: 14px;
+                                        color: Theme.text-muted;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                                if ri < root.deck-results.length - 1 : Rectangle {
+                                    x: 56px;
+                                    y: parent.height - 1px;
+                                    width: parent.width - 56px;
+                                    height: 1px;
+                                    background: Theme.separator;
+                                }
+                                res-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.activate-deck-entry(item.entry-id); }
                                 }
                             }
                         }
                     }
 
-                    // Quick Hardware Toggles Row
-                    Rectangle {
-                        height: 48px;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
+                    }
+                    }
 
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: Theme.space-sm;
-                            alignment: space-between;
-
-                            Text {
-                                text: "Quick Hardware";
-                                color: Theme.text-muted;
-                                font-size: 11px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-
-                            HorizontalLayout {
-                                spacing: Theme.space-sm;
-                                Button {
-                                    text: root.wifi-enabled ? "Wi-Fi: On" : "Wi-Fi: Off";
-                                    primary: root.wifi-enabled;
-                                    clicked => { root.toggle-wifi(); }
-                                }
-                                Button {
-                                    text: root.audio-muted ? "Audio: Muted" : "Audio: On";
-                                    primary: !root.audio-muted;
-                                    clicked => { root.toggle-audio-mute(); }
-                                }
-                                Button {
-                                    text: "Scale: " + root.display-scale-pct + "%";
-                                    clicked => { root.cycle-display-scale(); }
-                                }
-                                Button {
-                                    text: root.global-offline-shield ? "Offline Shield: ON" : "Offline Shield";
-                                    primary: root.global-offline-shield;
-                                    clicked => { root.toggle-offline-shield(); }
-                                }
-                            }
+                    // Quick controls
+                    HorizontalLayout {
+                        spacing: 8px;
+                        PushButton {
+                            text: root.wifi-enabled ? "Wi-Fi on" : "Wi-Fi off";
+                            icon: root.wifi-enabled ? "wifi" : "wifi-off";
+                            small: true;
+                            clicked => { root.toggle-wifi(); }
+                        }
+                        PushButton {
+                            text: root.audio-muted ? "Muted" : "Sound on";
+                            icon: root.audio-muted ? "volume-off" : "volume";
+                            small: true;
+                            clicked => { root.toggle-audio-mute(); }
+                        }
+                        PushButton {
+                            text: "Scale " + root.display-scale-pct + "%";
+                            icon: "monitor";
+                            small: true;
+                            clicked => { root.cycle-display-scale(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        PushButton {
+                            text: root.global-offline-shield ? "Offline shield on" : "Offline shield";
+                            icon: "shield";
+                            small: true;
+                            kind: root.global-offline-shield ? "primary" : "secondary";
+                            clicked => { root.toggle-offline-shield(); }
                         }
                     }
                 }
             }
         }
 
-        // ================= HARD POWER-OFF WARNING MODAL =================
-        if root.confirm-stop-visible : Rectangle {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height;
-            background: #020617cc;
-
-            TouchArea {}
-
-            Rectangle {
-                width: 480px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                border-radius: Theme.radius-md;
-                background: Theme.surface-bg;
-                border-width: 2px;
-                border-color: Theme.danger;
-
-                VerticalLayout {
-                    padding: 20px;
-                    spacing: Theme.space-md;
-                    Text { text: "Hard Power-Off Warning"; color: Theme.danger; font-size: 16px; font-weight: 700; }
-                    Text {
-                        text: "Force closing \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately powers off the Space without a graceful shutdown. Unsaved guest data may be lost.";
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-                    if root.confirm-stop-vm-disposable : Text {
-                        text: "This Space is DISPOSABLE — its writable CoW disk will be permanently discarded on stop.";
-                        color: Theme.danger;
-                        font-size: Theme.font-base;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        alignment: end;
-                        spacing: 10px;
-                        Button { text: "Cancel"; clicked => { root.confirm-stop-visible = false; } }
-                        Button {
-                            text: "Force Close Space";
-                            primary: true;
-                            clicked => {
-                                root.confirm-stop-visible = false;
-                                root.confirm-stop-vm-action(root.confirm-stop-vm-id);
-                            }
-                        }
-                    }
-                }
+        // ================= SHEETS =================
+        if root.confirm-stop-visible : Sheet {
+            title: "Stop “" + root.confirm-stop-vm-name + "”?";
+            message: "This switches the Space off immediately, like pulling the plug. Anything unsaved inside it may be lost.";
+            note: root.confirm-stop-vm-disposable ? "This Space is disposable: every change since it started will be erased." : "";
+            icon: "power";
+            tone: "danger";
+            confirm-text: "Stop Space";
+            confirm-kind: "danger-solid";
+            cancelled => { root.confirm-stop-visible = false; }
+            confirmed => {
+                root.confirm-stop-visible = false;
+                root.confirm-stop-vm-action(root.confirm-stop-vm-id);
             }
         }
 
-        // ================= SNAPSHOT RESTORE DATA-LOSS MODAL =================
-        if root.confirm-restore-visible : Rectangle {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height;
-            background: #020617cc;
-
-            TouchArea {}
-
-            Rectangle {
-                width: 480px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                border-radius: Theme.radius-md;
-                background: Theme.surface-bg;
-                border-width: 2px;
-                border-color: #f59e0b;
-
-                VerticalLayout {
-                    padding: 20px;
-                    spacing: Theme.space-md;
-                    Text { text: "Restore Snapshot Warning"; color: Theme.text-primary; font-size: 16px; font-weight: 700; }
-                    Text {
-                        text: "Restoring snapshot " + root.confirm-restore-short-id + " on \"" + root.confirm-restore-vm-name + "\" replaces its current disk atomically. All current disk changes since that snapshot will be permanently lost.";
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        alignment: end;
-                        spacing: 10px;
-                        Button { text: "Cancel"; clicked => { root.confirm-restore-visible = false; } }
-                        Button {
-                            text: "Restore Snapshot";
-                            primary: true;
-                            clicked => {
-                                root.confirm-restore-visible = false;
-                                root.confirm-restore-snapshot-action(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
-                            }
-                        }
-                    }
-                }
+        if root.confirm-restore-visible : Sheet {
+            title: "Restore snapshot " + root.confirm-restore-short-id + "?";
+            message: "“" + root.confirm-restore-vm-name + "” goes back to how it was when this snapshot was taken. Changes made since then are lost.";
+            icon: "restore";
+            tone: "warning";
+            confirm-text: "Restore";
+            confirm-kind: "primary";
+            cancelled => { root.confirm-restore-visible = false; }
+            confirmed => {
+                root.confirm-restore-visible = false;
+                root.confirm-restore-snapshot-action(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
             }
         }
     }

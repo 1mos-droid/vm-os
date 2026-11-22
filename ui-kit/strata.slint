@@ -1,0 +1,933 @@
+// Strata: the HyperOS design system shared by desktop-shell and VM Studio.
+//
+// Principles (see ui-kit/README.md):
+//   * Materials, not borders: depth comes from layered tinted surfaces over an
+//     aurora wallpaper (cheap enough for the CPU software renderer; no blur).
+//   * One type family (Inter) on a fixed ladder; hierarchy from weight and size.
+//   * Chrome recedes: flat header bars, ghost buttons, one accent-filled primary
+//     action per view.
+//   * Trust cues are calm but always present: origin colour edges and chips are
+//     drawn by the host, never by guests.
+//
+// The `Theme` property names are a stable contract with the Rust theme loader
+// (themes/*.json). Everything below `// Derived` is computed, not configurable.
+
+import "fonts/Inter-Regular.ttf";
+import "fonts/Inter-Medium.ttf";
+import "fonts/Inter-SemiBold.ttf";
+import "fonts/Inter-Bold.ttf";
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <string> id: "obsidian";
+    in-out property <string> name: "HyperOS Obsidian";
+    in-out property <string> layout-preset: "compact";
+    in-out property <int> density-level: 0;
+
+    in-out property <color> window-bg: #0c0e13;
+    in-out property <color> canvas-bg: #12151c;
+    in-out property <color> surface-bg: #181b23;
+    in-out property <color> surface-elevated: #20242e;
+    in-out property <color> border: #2b303c;
+    in-out property <color> text-primary: #f3f5f9;
+    in-out property <color> text-secondary: #b4bccb;
+    in-out property <color> text-muted: #7c8597;
+    in-out property <color> accent: #7b8cff;
+    in-out property <color> danger: #ff6b6b;
+    in-out property <color> success: #3ccf91;
+
+    in-out property <string> ui-font-family: "Inter";
+    in-out property <string> mono-font-family: "DejaVu Sans Mono";
+    in-out property <length> font-base: 13px;
+    in-out property <length> font-heading: 22px;
+
+    in-out property <length> radius-sm: 8px;
+    in-out property <length> radius-md: 12px;
+    in-out property <length> radius-lg: 18px;
+    in-out property <length> radius-pill: 40px;
+
+    in-out property <length> space-xs: 4px;
+    in-out property <length> space-sm: 8px;
+    in-out property <length> space-md: 12px;
+    in-out property <length> space-lg: 20px;
+
+    in-out property <bool> is-dark: true;
+
+    public function sync-palette(dark: bool) {
+        is-dark = dark;
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // Derived ------------------------------------------------------------
+    out property <color> separator: text-primary.with-alpha(is-dark ? 0.08 : 0.10);
+    out property <color> fill-subtle: text-primary.with-alpha(is-dark ? 0.05 : 0.04);
+    out property <color> fill-hover: text-primary.with-alpha(is-dark ? 0.09 : 0.07);
+    out property <color> fill-pressed: text-primary.with-alpha(is-dark ? 0.14 : 0.11);
+    out property <color> accent-soft: accent.with-alpha(is-dark ? 0.18 : 0.12);
+    out property <color> on-accent: #ffffff;
+    out property <color> warning: is-dark ? #f5b74e : #b7791f;
+    out property <color> info: is-dark ? #a99bff : #6b57d6;
+    out property <color> surface-glass: surface-bg.with-alpha(is-dark ? 0.82 : 0.86);
+    out property <color> bar-glass: window-bg.with-alpha(is-dark ? 0.72 : 0.78);
+    out property <color> scrim: is-dark ? #000000a0 : #0f172a55;
+    out property <color> knob: #ffffff;
+
+    // Type ladder (macOS-style): caption < footnote < body < headline < title3 < title2 < title1 < large
+    out property <length> size-caption: font-base - 2px;
+    out property <length> size-footnote: font-base - 1px;
+    out property <length> size-body: font-base;
+    out property <length> size-headline: font-base + 1px;
+    out property <length> size-title3: font-base + 4px;
+    out property <length> size-title2: font-heading - 4px;
+    out property <length> size-title1: font-heading;
+    out property <length> size-large: font-heading + 6px;
+}
+
+// Tone helper: maps a semantic tone name to a colour.
+export global Tones {
+    public pure function of(tone: string) -> color {
+        if (tone == "accent") { return Theme.accent; }
+        if (tone == "success") { return Theme.success; }
+        if (tone == "warning") { return Theme.warning; }
+        if (tone == "danger") { return Theme.danger; }
+        if (tone == "info") { return Theme.info; }
+        return Theme.text-secondary;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Icons: 24x24 stroke glyphs drawn with Path (no image decoders needed).
+// ---------------------------------------------------------------------------
+export component Icon inherits Path {
+    in property <string> name;
+    in property <length> size: 16px;
+    in property <color> color: Theme.text-primary;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: color;
+    stroke-width: Math.max(1.25px, size / 12);
+    commands:
+        name == "play" ? "M7 4.5v15l12-7.5z" :
+        name == "pause" ? "M8 5v14 M16 5v14" :
+        name == "stop" ? "M6.5 6.5h11v11h-11z" :
+        name == "power" ? "M12 3v8 M6.3 6.8a8 8 0 1 0 11.4 0" :
+        name == "camera" ? "M4 8.5h3.5l1.8-2.5h5.4l1.8 2.5H20v10H4z M9 13a3 3 0 1 0 6 0a3 3 0 1 0-6 0" :
+        name == "restore" ? "M3.5 12a8.5 8.5 0 1 0 2.6-6.1 M3.5 4v5h5" :
+        name == "trash" ? "M4 7h16 M9.5 7V4.5h5V7 M6 7l1 13h10l1-13" :
+        name == "plus" ? "M12 5v14 M5 12h14" :
+        name == "refresh" ? "M20 12a8 8 0 1 1-2.4-5.7 M20 4v5h-5" :
+        name == "search" ? "M4 10.5a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0-13 0 M15.5 15.5L20 20" :
+        name == "globe" ? "M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0 M3 12h18 M12 3c3.2 3.6 3.2 14.4 0 18 M12 3c-3.2 3.6-3.2 14.4 0 18" :
+        name == "lock" ? "M5.5 10.5h13v10h-13z M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" :
+        name == "home" ? "M4 11l8-7l8 7 M6 9.5V20h12V9.5" :
+        name == "record" ? "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0 M5.6 5.6a9 9 0 0 0 0 12.8 M18.4 5.6a9 9 0 0 1 0 12.8" :
+        name == "hourglass" ? "M7 3.5h10 M7 20.5h10 M8 3.5c0 5 8 4.5 8 8.5s-8 3.5-8 8.5 M16 3.5c0 5-8 4.5-8 8.5s8 3.5 8 8.5" :
+        name == "grid" ? "M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z" :
+        name == "package" ? "M3.5 7.5l8.5-4.5l8.5 4.5v9l-8.5 4.5l-8.5-4.5z M3.5 7.5l8.5 4.5l8.5-4.5 M12 12v9" :
+        name == "sliders" ? "M4 7h9 M17 7h3 M4 17h3 M11 17h9 M15 5v4 M9 15v4" :
+        name == "chip" ? "M7 7h10v10H7z M10 3.5V7 M14 3.5V7 M10 17v3.5 M14 17v3.5 M3.5 10H7 M3.5 14H7 M17 10h3.5 M17 14h3.5" :
+        name == "bolt" ? "M13 3L5 13.5h6L10 21l8-10.5h-6z" :
+        name == "chevron-right" ? "M9.5 6l6 6l-6 6" :
+        name == "check" ? "M5 12.5l4.5 4.5L19 7.5" :
+        name == "close" ? "M6.5 6.5l11 11 M17.5 6.5l-11 11" :
+        name == "minus" ? "M5 12h14" :
+        name == "window" ? "M3.5 5h17v14h-17z M3.5 9h17" :
+        name == "monitor" ? "M3 4.5h18v11.5H3z M8.5 20h7 M12 16v4" :
+        name == "wifi" ? "M2.5 9a14 14 0 0 1 19 0 M5.5 12.5a9.5 9.5 0 0 1 13 0 M8.8 16a5 5 0 0 1 6.4 0 M12 19.5h.01" :
+        name == "wifi-off" ? "M3 3l18 18 M8.8 16a5 5 0 0 1 6.4 0 M5.5 12.5a9.5 9.5 0 0 1 4-2.3 M2.5 9a14 14 0 0 1 5-3 M14.5 10.3a9.5 9.5 0 0 1 4 2.2 M12 19.5h.01" :
+        name == "volume" ? "M4 9.5h3.5L12 5.5v13l-4.5-4H4z M15.5 9a4.5 4.5 0 0 1 0 6 M18 6.5a8 8 0 0 1 0 11" :
+        name == "volume-off" ? "M4 9.5h3.5L12 5.5v13l-4.5-4H4z M16 9.5l5 5 M21 9.5l-5 5" :
+        name == "battery" ? "M3 8h15v8H3z M20.5 10.5v3" :
+        name == "disk" ? "M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3v12c0 1.7-3.1 3-7 3s-7-1.3-7-3z M5 6c0 1.7 3.1 3 7 3s7-1.3 7-3 M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" :
+        name == "shield" ? "M12 3l7.5 3v5.5c0 4.5-3.2 8-7.5 9.5c-4.3-1.5-7.5-5-7.5-9.5V6z" :
+        name == "command" ? "M9 6.5a2.5 2.5 0 1 0-2.5 2.5H17.5a2.5 2.5 0 1 0-2.5-2.5v11a2.5 2.5 0 1 0 2.5-2.5H6.5a2.5 2.5 0 1 0 2.5 2.5z" :
+        name == "layout-left" ? "M3.5 5h17v14h-17z M12 5v14" :
+        name == "layout-quarter" ? "M3.5 5h17v14h-17z M12 5v14 M3.5 12h17" :
+        name == "maximize" ? "M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5" :
+        name == "sparkle" ? "M12 3.5l1.9 5.1l5.1 1.9l-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" :
+        name == "alert" ? "M12 4l9 16H3z M12 10v4.5 M12 17.5h.01" :
+        name == "dot" ? "M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0" :
+        "M12 12h.01";
+}
+
+// ---------------------------------------------------------------------------
+// Surfaces
+// ---------------------------------------------------------------------------
+
+// Aurora wallpaper: the HyperOS signature. Three soft light fields over the base.
+export component Backdrop inherits Rectangle {
+    in property <float> intensity: 1.0;
+    background: Theme.window-bg;
+    clip: true;
+    Rectangle {
+        x: -parent.width * 0.25;
+        y: -parent.height * 0.55;
+        width: parent.width * 1.0;
+        height: parent.height * 1.2;
+        background: @radial-gradient(circle, Theme.accent.with-alpha((Theme.is-dark ? 0.30 : 0.22) * root.intensity) 0%, transparent 65%);
+    }
+    Rectangle {
+        x: parent.width * 0.45;
+        y: parent.height * 0.25;
+        width: parent.width * 0.9;
+        height: parent.height * 1.1;
+        background: @radial-gradient(circle, Theme.info.with-alpha((Theme.is-dark ? 0.22 : 0.16) * root.intensity) 0%, transparent 62%);
+    }
+    Rectangle {
+        x: -parent.width * 0.15;
+        y: parent.height * 0.5;
+        width: parent.width * 0.7;
+        height: parent.height * 0.9;
+        background: @radial-gradient(circle, Theme.success.with-alpha((Theme.is-dark ? 0.12 : 0.10) * root.intensity) 0%, transparent 60%);
+    }
+}
+
+// Card: the standard content surface.
+export component Card inherits Rectangle {
+    in property <bool> elevated: false;
+    border-radius: Theme.radius-lg;
+    background: elevated ? Theme.surface-elevated : Theme.surface-glass;
+    border-width: 1px;
+    border-color: Theme.separator;
+}
+
+// A thin separator line.
+export component Separator inherits Rectangle {
+    height: 1px;
+    background: Theme.separator;
+}
+
+// ---------------------------------------------------------------------------
+// Typography
+// ---------------------------------------------------------------------------
+export component LargeTitle inherits Text {
+    font-size: Theme.size-large;
+    font-weight: 700;
+    color: Theme.text-primary;
+    letter-spacing: -0.4px;
+}
+
+export component Title inherits Text {
+    font-size: Theme.size-title3;
+    font-weight: 600;
+    color: Theme.text-primary;
+    letter-spacing: -0.2px;
+}
+
+export component Headline inherits Text {
+    font-size: Theme.size-headline;
+    font-weight: 600;
+    color: Theme.text-primary;
+}
+
+export component Body inherits Text {
+    font-size: Theme.size-body;
+    color: Theme.text-secondary;
+    wrap: word-wrap;
+}
+
+export component Caption inherits Text {
+    font-size: Theme.size-footnote;
+    color: Theme.text-muted;
+}
+
+export component SectionTitle inherits Text {
+    font-size: Theme.size-footnote;
+    font-weight: 600;
+    color: Theme.text-muted;
+    letter-spacing: 0.3px;
+}
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+// Push button. kind: primary | secondary | ghost | danger | danger-solid
+export component PushButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> kind: "secondary";
+    in property <bool> enabled: true;
+    in property <bool> small: false;
+    callback clicked();
+
+    property <length> h: small ? 28px : 34px;
+    property <color> fg:
+        kind == "primary" || kind == "danger-solid" ? Theme.on-accent :
+        kind == "danger" ? Theme.danger :
+        Theme.text-primary;
+    property <color> base:
+        kind == "primary" ? Theme.accent :
+        kind == "danger-solid" ? Theme.danger :
+        kind == "danger" ? Theme.danger.with-alpha(0.12) :
+        kind == "ghost" ? transparent :
+        Theme.fill-subtle;
+
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    min-height: h;
+    min-width: content.min-width;
+    preferred-width: content.preferred-width;
+
+    // The visual is centred inside whatever height the parent layout grants.
+    Rectangle {
+        y: (parent.height - root.h) / 2;
+        height: root.h;
+        border-radius: Theme.radius-sm;
+        background: !root.enabled ? root.base :
+            ta.pressed ? (root.kind == "primary" || root.kind == "danger-solid" ? root.base.darker(0.15) : Theme.fill-pressed) :
+            ta.has-hover ? (root.kind == "primary" || root.kind == "danger-solid" ? root.base.brighter(0.08) : root.kind == "danger" ? Theme.danger.with-alpha(0.2) : Theme.fill-hover) :
+            root.base;
+        border-width: root.kind == "secondary" ? 1px : 0px;
+        border-color: Theme.separator;
+        opacity: root.enabled ? 1.0 : 0.38;
+        animate background { duration: 120ms; }
+
+        content := HorizontalLayout {
+            padding-left: root.text == "" ? 8px : (root.small ? 10px : 14px);
+            padding-right: root.text == "" ? 8px : (root.small ? 10px : 14px);
+            spacing: 6px;
+            alignment: center;
+            if root.icon != "" : Icon {
+                name: root.icon;
+                size: root.small ? 14px : 15px;
+                color: root.fg;
+                y: (parent.height - self.height) / 2;
+            }
+            if root.text != "" : Text {
+                text: root.text;
+                color: root.fg;
+                font-size: root.small ? Theme.size-footnote : Theme.size-body;
+                font-weight: root.kind == "primary" || root.kind == "danger-solid" ? 600 : 500;
+                vertical-alignment: center;
+            }
+        }
+
+        ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Square icon-only button (toolbar style).
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    in property <color> tint: Theme.text-secondary;
+    in property <length> button-size: 32px;
+    callback clicked();
+
+    width: button-size;
+    min-height: button-size;
+    vertical-stretch: 0;
+
+    Rectangle {
+        y: (parent.height - root.button-size) / 2;
+        height: root.button-size;
+        border-radius: Theme.radius-sm;
+        background: root.active ? Theme.accent-soft : ta.pressed ? Theme.fill-pressed : ta.has-hover ? Theme.fill-hover : transparent;
+        opacity: root.enabled ? 1.0 : 0.35;
+        animate background { duration: 120ms; }
+
+        Icon {
+            name: root.icon;
+            size: root.button-size * 0.5;
+            color: root.active ? Theme.accent : root.tint;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+
+        ta := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Small status label. tone: neutral | accent | success | warning | danger | info
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> tone: "neutral";
+    in property <bool> dot: false;
+    property <color> c: Tones.of(root.tone);
+
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    min-height: 22px;
+    min-width: content.min-width;
+    preferred-width: content.preferred-width;
+
+    Rectangle {
+        y: (parent.height - 22px) / 2;
+        height: 22px;
+        border-radius: 11px;
+        background: root.tone == "neutral" ? Theme.fill-subtle : root.c.with-alpha(0.14);
+
+        content := HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 9px;
+            spacing: 5px;
+            if root.dot : Rectangle {
+                width: 6px;
+                height: 6px;
+                y: (parent.height - 6px) / 2;
+                border-radius: 3px;
+                background: root.c;
+            }
+            if root.icon != "" : Icon {
+                name: root.icon;
+                size: 12px;
+                color: root.c;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.text;
+                color: root.tone == "neutral" ? Theme.text-secondary : root.c;
+                font-size: Theme.size-caption;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// Status dot.
+export component StatusDot inherits Rectangle {
+    in property <color> dot-color: Theme.success;
+    width: 8px;
+    min-height: 8px;
+    vertical-stretch: 0;
+    Rectangle {
+        y: (parent.height - 8px) / 2;
+        height: 8px;
+        border-radius: 4px;
+        background: root.dot-color;
+    }
+}
+
+// iOS/GNOME style switch.
+export component Switch inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    width: 40px;
+    min-height: 24px;
+    vertical-stretch: 0;
+
+    Rectangle {
+        y: (parent.height - 24px) / 2;
+        height: 24px;
+        border-radius: 12px;
+        background: root.checked ? Theme.accent : Theme.fill-pressed;
+        opacity: root.enabled ? 1.0 : 0.4;
+        animate background { duration: 140ms; }
+
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: 2px;
+            x: root.checked ? parent.width - 22px : 2px;
+            border-radius: 10px;
+            background: Theme.knob;
+            animate x { duration: 140ms; easing: ease-out; }
+        }
+
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => {
+                root.checked = !root.checked;
+                root.toggled();
+            }
+        }
+    }
+}
+
+// Segmented control (macOS) / view switcher (GNOME).
+export component Segmented inherits Rectangle {
+    in property <[string]> items;
+    in property <[string]> icons;
+    in-out property <int> current;
+    in property <bool> small: false;
+    callback activated(int);
+
+    property <length> h: small ? 28px : 32px;
+    min-height: h;
+    vertical-stretch: 0;
+
+    track := Rectangle {
+        y: (parent.height - root.h) / 2;
+        height: root.h;
+        border-radius: Theme.radius-sm;
+        background: Theme.fill-subtle;
+    }
+
+    HorizontalLayout {
+        y: track.y;
+        height: root.h;
+        padding: 3px;
+        spacing: 2px;
+        for item[i] in root.items : Rectangle {
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-sm - 2px;
+            background: root.current == i ? Theme.surface-elevated : seg-ta.has-hover ? Theme.fill-hover : transparent;
+            border-width: root.current == i ? 1px : 0px;
+            border-color: Theme.separator;
+            animate background { duration: 120ms; }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
+                alignment: center;
+                if i < root.icons.length && root.icons[i] != "" : Icon {
+                    name: root.icons[i];
+                    size: 14px;
+                    color: root.current == i ? Theme.text-primary : Theme.text-muted;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: item;
+                    color: root.current == i ? Theme.text-primary : Theme.text-secondary;
+                    font-size: root.small ? Theme.size-footnote : Theme.size-body;
+                    font-weight: root.current == i ? 600 : 500;
+                    vertical-alignment: center;
+                }
+            }
+            seg-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current = i;
+                    root.activated(i);
+                }
+            }
+        }
+    }
+}
+
+// Thin progress / usage meter.
+export component Meter inherits Rectangle {
+    in property <float> ratio: 0.0;
+    in property <color> fill: Theme.accent;
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.fill-pressed;
+    clip: true;
+    Rectangle {
+        x: 0px;
+        width: parent.width * Math.clamp(root.ratio, 0.0, 1.0);
+        border-radius: 3px;
+        background: root.fill;
+        animate width { duration: 240ms; easing: ease-out; }
+    }
+}
+
+// Single-line text field.
+export component Field inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <string> icon;
+    in property <length> field-font-size: Theme.size-body;
+    callback edited(string);
+
+    min-height: 38px;
+    border-radius: Theme.radius-sm;
+    background: Theme.fill-subtle;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.separator;
+    animate border-color { duration: 120ms; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        if root.icon != "" : Icon {
+            name: root.icon;
+            size: 16px;
+            color: Theme.text-muted;
+            y: (parent.height - self.height) / 2;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if root.text == "" : Text {
+                width: 100%;
+                height: 100%;
+                text: root.placeholder;
+                color: Theme.text-muted;
+                font-size: root.field-font-size;
+                vertical-alignment: center;
+            }
+            input := TextInput {
+                width: 100%;
+                height: 100%;
+                text <=> root.text;
+                color: Theme.text-primary;
+                font-size: root.field-font-size;
+                vertical-alignment: center;
+                single-line: true;
+                selection-background-color: Theme.accent-soft;
+                edited => { root.edited(self.text); }
+            }
+        }
+    }
+}
+
+// Horizontal slider.
+export component RangeSlider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in-out property <float> value;
+    callback changed(float);
+
+    property <float> ratio: Math.clamp((root.value - root.minimum) / Math.max(1, root.maximum - root.minimum), 0, 1);
+
+    function set-from(px: length) {
+        root.value = root.minimum + Math.clamp((px - 10px) / Math.max(1px, root.width - 20px), 0, 1) * (root.maximum - root.minimum);
+        root.changed(root.value);
+    }
+
+    min-height: 24px;
+    horizontal-stretch: 1;
+
+    Rectangle {
+        x: 10px;
+        y: (parent.height - 4px) / 2;
+        width: parent.width - 20px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.fill-pressed;
+    }
+    Rectangle {
+        x: 10px;
+        y: (parent.height - 4px) / 2;
+        width: (parent.width - 20px) * root.ratio;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Rectangle {
+        width: 20px;
+        height: 20px;
+        x: (parent.width - 20px) * root.ratio;
+        y: (parent.height - 20px) / 2;
+        border-radius: 10px;
+        background: Theme.knob;
+        border-width: 1px;
+        border-color: #00000022;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.set-from(self.mouse-x);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.set-from(self.mouse-x);
+            }
+        }
+    }
+}
+
+// Rounded-square tile used as an avatar for Spaces, templates and list rows.
+export component Tile inherits Rectangle {
+    in property <string> icon;
+    in property <color> tint: Theme.accent;
+    in property <length> tile-size: 40px;
+    in property <string> badge;
+
+    width: tile-size;
+    height: tile-size;
+    border-radius: tile-size * 0.28;
+    background: @linear-gradient(140deg, tint.with-alpha(0.95) 0%, tint.darker(0.35) 100%);
+
+    Icon {
+        name: root.icon;
+        size: root.tile-size * 0.5;
+        color: #ffffff;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    if root.badge != "" : Rectangle {
+        width: root.tile-size * 0.46;
+        height: root.tile-size * 0.46;
+        x: parent.width - self.width * 0.75;
+        y: parent.height - self.height * 0.75;
+        border-radius: self.width / 2;
+        background: Theme.surface-elevated;
+        border-width: 1.5px;
+        border-color: Theme.window-bg;
+        Icon {
+            name: root.badge;
+            size: parent.width * 0.62;
+            color: Theme.warning;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// Grouped list (libadwaita "boxed list").
+export component ListGroup inherits Card {
+    clip: true;
+    VerticalLayout {
+        @children
+    }
+}
+
+// One row in a ListGroup. Put trailing controls as children.
+export component ListRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> icon;
+    in property <color> icon-tint: Theme.accent;
+    in property <bool> last: false;
+    in property <bool> mono-subtitle: false;
+
+    min-height: 56px;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+
+        if root.icon != "" : VerticalLayout {
+            alignment: center;
+            Tile {
+                icon: root.icon;
+                tint: root.icon-tint;
+                tile-size: 32px;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-size: Theme.size-body;
+                font-weight: 500;
+                overflow: elide;
+            }
+            if root.subtitle != "" : Text {
+                text: root.subtitle;
+                color: Theme.text-muted;
+                font-size: Theme.size-footnote;
+                font-family: root.mono-subtitle ? Theme.mono-font-family : Theme.ui-font-family;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: end;
+            @children
+        }
+    }
+
+    if !root.last : Rectangle {
+        x: 16px;
+        y: parent.height - 1px;
+        width: parent.width - 16px;
+        height: 1px;
+        background: Theme.separator;
+    }
+}
+
+// Selectable option card (radio-style), e.g. network mode in the Create flow.
+export component OptionCard inherits Rectangle {
+    preferred-width: 120px;
+    in property <string> title;
+    in property <string> description;
+    in property <string> icon;
+    in property <color> tint: Theme.accent;
+    in property <bool> selected: false;
+    in property <bool> selectable: true;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: selected ? tint.with-alpha(0.10) : ta.has-hover ? Theme.fill-hover : Theme.fill-subtle;
+    border-width: selected ? 1.5px : 1px;
+    border-color: selected ? tint : Theme.separator;
+    animate background, border-color { duration: 140ms; }
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 10px;
+            if root.icon != "" : Tile {
+                icon: root.icon;
+                tint: root.tint;
+                tile-size: 30px;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if root.selectable : Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border-width: root.selected ? 0px : 1.5px;
+                border-color: Theme.separator.with-alpha(0.4);
+                background: root.selected ? root.tint : transparent;
+                if root.selected : Icon {
+                    name: "check";
+                    size: 12px;
+                    color: #ffffff;
+                    x: 3px;
+                    y: 3px;
+                }
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-size: Theme.size-body;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.description;
+            color: Theme.text-muted;
+            font-size: Theme.size-footnote;
+            wrap: word-wrap;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Floating notification pill (macOS / GNOME toast).
+export component Toast inherits Rectangle {
+    in property <string> text;
+    in property <bool> error: false;
+    callback dismissed();
+    height: 40px;
+    border-radius: 20px;
+    background: Theme.surface-elevated;
+    border-width: 1px;
+    border-color: error ? Theme.danger.with-alpha(0.5) : Theme.separator;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 18px;
+        spacing: 10px;
+        Icon {
+            name: root.error ? "alert" : "check";
+            size: 16px;
+            color: root.error ? Theme.danger : Theme.success;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: Theme.size-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        IconButton {
+            icon: "close";
+            button-size: 24px;
+            clicked => { root.dismissed(); }
+        }
+    }
+}
+
+// Modal confirmation sheet. Fills its parent with a scrim.
+export component Sheet inherits Rectangle {
+    in property <string> title;
+    in property <string> message;
+    in property <string> note;
+    in property <string> icon: "alert";
+    in property <string> tone: "danger";
+    in property <string> confirm-text: "Confirm";
+    in property <string> confirm-kind: "danger-solid";
+    callback confirmed();
+    callback cancelled();
+
+    background: Theme.scrim;
+    TouchArea {}
+
+    card := Rectangle {
+        width: Math.min(440px, parent.width - 48px);
+        height: body.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: Theme.radius-lg;
+        background: Theme.surface-elevated;
+        border-width: 1px;
+        border-color: Theme.separator;
+
+        body := VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+            Rectangle {
+                width: 44px;
+                height: 44px;
+                border-radius: 22px;
+                background: Tones.of(root.tone).with-alpha(0.15);
+                Icon {
+                    name: root.icon;
+                    size: 22px;
+                    color: Tones.of(root.tone);
+                    x: 11px;
+                    y: 11px;
+                }
+            }
+            Title { text: root.title; }
+            Body { text: root.message; }
+            if root.note != "" : Rectangle {
+                border-radius: Theme.radius-sm;
+                background: Tones.of(root.tone).with-alpha(0.10);
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Icon {
+                        name: "hourglass";
+                        size: 15px;
+                        color: Tones.of(root.tone);
+                    }
+                    Text {
+                        text: root.note;
+                        color: Tones.of(root.tone);
+                        font-size: Theme.size-footnote;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-top: 6px;
+                spacing: 8px;
+                alignment: end;
+                PushButton {
+                    text: "Cancel";
+                    kind: "secondary";
+                    clicked => { root.cancelled(); }
+                }
+                PushButton {
+                    text: root.confirm-text;
+                    kind: root.confirm-kind;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}

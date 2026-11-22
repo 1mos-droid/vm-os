@@ -24,4 +24,12 @@ define VM_CONTROL_UI_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/br-target/x86_64-unknown-linux-musl/release/vm-control-ui $(TARGET_DIR)/usr/bin/vm-control-ui
 endef
 
+# Shared Strata design system (ui-kit/: Slint components and Inter fonts).
+# build.rs finds it at ./ui-kit inside the build directory.
+define VM_CONTROL_UI_COPY_UI_KIT
+	rm -rf $(@D)/ui-kit
+	cp -a $(BR2_EXTERNAL_HYPEROS_PATH)/../ui-kit $(@D)/ui-kit
+endef
+VM_CONTROL_UI_POST_RSYNC_HOOKS += VM_CONTROL_UI_COPY_UI_KIT
+
 $(eval $(generic-package))

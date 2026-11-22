@@ -377,7 +377,7 @@ mod tests {
         assert!(!obsidian.is_light_surface());
         assert_eq!(
             parse_hex_rgb(&obsidian.colors.window_bg).unwrap(),
-            (9, 13, 22)
+            (12, 14, 19)
         );
 
         let daylight = parse_theme_str(BUILTIN_DAYLIGHT_JSON).unwrap();
@@ -407,23 +407,23 @@ mod tests {
 
     #[test]
     fn rejects_invalid_hex_colors_and_out_of_range_metrics() {
-        let short_hex = BUILTIN_OBSIDIAN_JSON.replacen("#090d16", "#090", 1);
+        let short_hex = BUILTIN_OBSIDIAN_JSON.replacen("#0c0e13", "#0c0", 1);
         assert!(parse_theme_str(&short_hex)
             .unwrap_err()
             .contains("colors.window_bg"));
 
-        let func_hex = BUILTIN_OBSIDIAN_JSON.replacen("#06b6d4", "rgb(6,182,212)", 1);
+        let func_hex = BUILTIN_OBSIDIAN_JSON.replacen("#7b8cff", "rgb(123,140,255)", 1);
         assert!(parse_theme_str(&func_hex)
             .unwrap_err()
             .contains("colors.accent"));
 
         let huge_font =
-            BUILTIN_OBSIDIAN_JSON.replacen("\"base_size_px\": 12,", "\"base_size_px\": 72,", 1);
+            BUILTIN_OBSIDIAN_JSON.replacen("\"base_size_px\": 13,", "\"base_size_px\": 72,", 1);
         assert!(parse_theme_str(&huge_font)
             .unwrap_err()
             .contains("outside allowed range"));
 
-        let inverted_radii = BUILTIN_OBSIDIAN_JSON.replacen("\"lg_px\": 16,", "\"lg_px\": 4,", 1);
+        let inverted_radii = BUILTIN_OBSIDIAN_JSON.replacen("\"lg_px\": 18,", "\"lg_px\": 4,", 1);
         assert!(parse_theme_str(&inverted_radii)
             .unwrap_err()
             .contains("radii.lg_px"));
@@ -432,10 +432,10 @@ mod tests {
     #[test]
     fn rejects_float_numbers_and_unsafe_font_family_tokens() {
         let float_px =
-            BUILTIN_OBSIDIAN_JSON.replacen("\"base_size_px\": 12,", "\"base_size_px\": 12.5,", 1);
+            BUILTIN_OBSIDIAN_JSON.replacen("\"base_size_px\": 13,", "\"base_size_px\": 13.5,", 1);
         assert!(parse_theme_str(&float_px).is_err());
 
-        let bad_font = BUILTIN_OBSIDIAN_JSON.replacen("\"DejaVu Sans\"", "\"/tmp/evil;sh\"", 1);
+        let bad_font = BUILTIN_OBSIDIAN_JSON.replacen("\"Inter\"", "\"/tmp/evil;sh\"", 1);
         assert!(parse_theme_str(&bad_font)
             .unwrap_err()
             .contains("disallowed characters"));

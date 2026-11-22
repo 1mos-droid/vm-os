@@ -22,6 +22,7 @@ Keep pull requests focused on a single subsystem unless you are landing an appro
 | `kernel-buildroot/` | Buildroot `BR2_EXTERNAL` configs, kernel config, `runit` packaging, board/GRUB image generation, rootfs overlay |
 | `vmm-daemon/` | Rust VM lifecycle daemon, `crosvm` supervision, Btrfs storage & network sandboxing |
 | `vm-control-ui/` | Lightweight native desktop GUI client over `/run/hyperos/vmm.sock` (plus `--mock` mode) |
+| `ui-kit/` | Strata design system (Slint tokens, components, Inter font) shared by both UIs |
 | `desktop-shell/` | Workspace-First Wayland compositor (Smithay + Slint) talking to `/run/hyperos/vmm.sock` (plus `--mock` mode) |
 | `guest-images/` | Reproducible guest base-image build scripts and import manifests |
 | `docs/` | Operational, cloud-testing, and user documentation |

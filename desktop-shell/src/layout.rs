@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Reserved height at the top of the output for the Workspace-First Top Context Rail.
-pub const TOP_RAIL_HEIGHT_PX: i32 = 46;
+/// Reserved height at the top of the output for the top bar (`ui/shell.slint` `bar-h`).
+pub const TOP_RAIL_HEIGHT_PX: i32 = 36;
+
+/// Reserved height at the bottom of the output for the floating dock (`dock-h`).
+pub const BOTTOM_DOCK_HEIGHT_PX: i32 = 84;
 
 /// Subtle breathing gap around snapped tiles (in logical pixels).
 pub const TILE_GAP_PX: i32 = 8;
@@ -60,12 +63,13 @@ impl SnapZone {
     }
 
     /// Compute the exact target rectangle for this snap zone within an output of `(out_w, out_h)`,
-    /// always preserving the Top Context Rail and symmetric gaps.
+    /// keeping the top bar and dock clear, with symmetric gaps.
     pub fn target_rect(self, out_w: i32, out_h: i32) -> Rect {
         let usable_x = TILE_GAP_PX;
         let usable_y = TOP_RAIL_HEIGHT_PX + TILE_GAP_PX;
         let usable_w = (out_w - TILE_GAP_PX * 2).max(200);
-        let usable_h = (out_h - TOP_RAIL_HEIGHT_PX - TILE_GAP_PX * 2).max(160);
+        let usable_h =
+            (out_h - TOP_RAIL_HEIGHT_PX - BOTTOM_DOCK_HEIGHT_PX - TILE_GAP_PX * 2).max(160);
 
         let half_w = (usable_w - TILE_GAP_PX) / 2;
         let right_x = usable_x + half_w + TILE_GAP_PX;
@@ -99,10 +103,10 @@ pub fn detect_magnetic_snap(px: i32, py: i32, out_w: i32, out_h: i32) -> Option<
     let near_left = px <= t;
     let near_right = px >= out_w - t;
     let near_top = py <= top_edge;
-    let near_bottom = py >= out_h - t;
+    let near_bottom = py >= out_h - BOTTOM_DOCK_HEIGHT_PX - t;
 
     let in_top_corner = py <= TOP_RAIL_HEIGHT_PX + corner_band;
-    let in_bottom_corner = py >= out_h - corner_band;
+    let in_bottom_corner = py >= out_h - BOTTOM_DOCK_HEIGHT_PX - corner_band;
     let in_left_corner = px <= corner_band;
     let in_right_corner = px >= out_w - corner_band;
 
@@ -276,7 +280,7 @@ mod tests {
         let tl = SnapZone::TopLeftQuarter.target_rect(1280, 720);
         let br = SnapZone::BottomRightQuarter.target_rect(1280, 720);
         assert_eq!(tl.y + tl.h + TILE_GAP_PX, br.y);
-        assert_eq!(br.y + br.h + TILE_GAP_PX, 720);
+        assert_eq!(br.y + br.h + TILE_GAP_PX, 720 - BOTTOM_DOCK_HEIGHT_PX);
     }
 
     #[test]
