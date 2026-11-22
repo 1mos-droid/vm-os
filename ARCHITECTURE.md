@@ -208,6 +208,133 @@ CoW. Stage create/snapshot operations and commit atomically; recover interrupted
 staging on startup. Never delete a base referenced by an instance/snapshot. No
 service formats disks on boot. A failed data mount blocks daemon startup.
 
+## Contract v2 additions (proposed, pending maintainer approval)
+
+This section is the A0 step of [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md).
+Everything above describes v1 as implemented. Once approved, implementers code
+against this section; when a step lands, its text is folded into the v1 sections
+above and removed here. All v1 rules (framing, unknown-key rejection, integer
+types, no implicit defaults, error format, atomic commit) apply unchanged.
+
+### Socket authorization (A3)
+
+* Group `hyperos` (fixed GID, supplied by the image). Socket `root:hyperos` mode
+  `0660`; `/run/hyperos` `root:hyperos` mode `0750`. Daemon umask stays 077 and
+  sets these modes explicitly after bind.
+* `SO_PEERCRED`: accept UID 0, or a peer whose primary or supplementary groups
+  (read from `/proc/<pid>/status` `Groups:` for the peer PID, re-checked per
+  connection) include the `hyperos` GID. Reject everything else by closing the
+  connection without a response.
+* Members of `hyperos` may call every method. The check lives in one function so
+  per-method roles can be added later. No new error code is introduced.
+* Membership in `hyperos` is equivalent to full control of every VM. The GUI
+  session user is the only intended member. Never forward the socket over TCP.
+
+### Unprivileged crosvm (A2)
+
+* The daemon stays root and performs all privileged setup (TAP creation, disk
+  and control-socket preparation, nftables, cgroups if any).
+* Each running VM's crosvm runs under its own UID/GID from the range
+  `61000`–`61254` (UID = GID = 61000 + slot), allocated at start and released on
+  reap. Never 0. Supplementary groups are exactly `kvm`. `/dev/kvm` is
+  `root:kvm 0660` (supplied by the image).
+* The per-VM disk, TAP and control socket are owned by that UID for the life of
+  the process and returned to `root` on stop. crosvm's jail and seccomp remain
+  enabled. A daemon restart reaps orphans before reallocating UIDs.
+
+### NAT semantics (A1)
+
+`nat` gives a guest the public internet only. The forward chain drops guest
+traffic to every non-global IPv4 destination: `0.0.0.0/8`, `10.0.0.0/8`,
+`100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`,
+`192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4` and
+`240.0.0.0/4` (which includes broadcast). All guest IPv6 is dropped. An input
+chain drops every packet from the guest TAP addressed to the host except
+`ct state established,related`. The host provides no DHCP or DNS: guests use
+static addressing (`10.200.<slot>.2/30`, gateway `.1`) and a public resolver.
+Known limit: an uplink LAN that uses public (non-RFC1918) addresses is not
+blocked by these ranges.
+
+### Disposable VMs (A4)
+
+* `create_vm` params gain a required `"disposable": boolean`. The VM object
+  gains a required `"disposable": boolean`, fixed at creation.
+* A disposable VM's writable disk is discarded on every stop or crash and
+  re-cloned from its base at the next start. Its metadata persists (v1 has no
+  VM deletion).
+* `snapshot_vm` and `restore_snapshot` on a disposable VM return -32002.
+* Metadata written by v1 (no `disposable` key) loads as `false`. On the wire
+  the key is always present and always required in `create_vm`.
+
+### Snapshot methods (A4)
+
+| Method | params object | result |
+| --- | --- | --- |
+| `list_snapshots` | `{"vm_id": uuid}` | `{"snapshots": [Snapshot, ...]}` sorted by `created_at`, then `snapshot_id` |
+| `restore_snapshot` | `{"vm_id": uuid, "snapshot_id": uuid}` | VM object |
+| `delete_snapshot` | `{"vm_id": uuid, "snapshot_id": uuid}` | `{}` |
+
+`restore_snapshot` requires the VM to be stopped. It stages a writable Btrfs
+snapshot of `snapshots/<snapshot_id>/`, swaps it in for `current/` atomically,
+then deletes the old `current/`; on any failure `current/` is unchanged. Other
+snapshots are unaffected. `delete_snapshot` works in any VM state. Both return
+-32001 for an unknown snapshot or VM.
+
+### Packet capture methods (A4)
+
+| Method | params object | result |
+| --- | --- | --- |
+| `start_capture` | `{"vm_id": uuid}` | Capture object |
+| `stop_capture` | `{"vm_id": uuid}` | Capture object |
+| `list_captures` | `{"vm_id": uuid}` | `{"captures": [Capture, ...]}` sorted by `started_at`, then `capture_id` |
+| `delete_capture` | `{"vm_id": uuid, "capture_id": uuid}` | `{}` |
+
+Capture object (all keys required):
+
+```json
+{"capture_id":"0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e91","vm_id":"b6f51eed-8dc7-47f6-a8e7-81b6ae783a21","started_at":"2026-11-22T00:00:00Z","state":"running","bytes":0}
+```
+
+`state` is exactly `running`, `stopped` or `limit_reached`. `bytes` is the
+current pcap file size.
+
+* `start_capture` requires a running VM with a NIC (`nat` or `host-only`):
+  -32002 if not running, -32004 for `isolated`, -32002 if a capture is already
+  running for that VM.
+* The daemon records every frame on the VM's TAP (both directions) into a
+  classic pcap file (Ethernet link type) using its own `AF_PACKET` socket. No
+  external capture binary is used.
+* A capture stops when `stop_capture` is called (idempotent if none is running:
+  it returns the latest capture or -32001 if there is none), when the VM stops
+  or crashes, or when the file reaches 256 MiB (`limit_reached`).
+* Files live at `/var/lib/hyperos/captures/<vm_id>/<capture_id>.pcap`, owned by
+  `root:hyperos`, mode `0640`; the directories are `root:hyperos 0750`, and
+  `/var/lib/hyperos` itself becomes `root:hyperos 0710` (traverse-only) so the
+  GUI user can open known capture paths and nothing else. The path is derived
+  from IDs, never taken from a request. Captures contain raw guest traffic,
+  including anything malware sends; treat them as untrusted input.
+* Capture metadata persists under `captures/<vm_id>/<capture_id>.json`. Only
+  `delete_capture` removes a capture. At daemon start, any capture left in
+  `running` is marked `stopped`.
+
+### Storage layout additions
+
+```text
+/var/lib/hyperos/                  # root:hyperos 0710 (was root:root 0700)
+  captures/<vm_id>/                # root:hyperos 0750
+    <capture_id>.pcap              # root:hyperos 0640
+    <capture_id>.json              # Capture object, atomically replaced
+```
+
+`base-images/` and `instances/` stay `root:root 0700`.
+
+### Image requirements for Codex (B2/B4)
+
+The image must provide the `hyperos` group, the `kvm` group with `/dev/kvm`
+`root:kvm 0660`, an unprivileged GUI user in `hyperos`, and the
+`/var/lib/hyperos` and `captures/` modes above (set by `/etc/sv/storage/run`).
+KSM is `run=0`.
+
 ## Build, boot and acceptance
 
 Pinned baseline: Buildroot 2025.02.1, Linux 6.12.20, runit 2.1.2. CI verifies the
