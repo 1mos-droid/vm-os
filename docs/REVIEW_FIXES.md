@@ -247,6 +247,6 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 ### Progress
 
 - [x] Docs match the code (this commit)
-- [ ] A0 · [ ] A1 · [ ] A2 · [ ] A3 · [ ] A4 · [ ] A5
+- [ ] A0 (drafted, awaiting approval) · [x] A1 · [ ] A2 · [ ] A3 · [ ] A4 · [ ] A5
 - [ ] B1 · [ ] B2 · [ ] B3 · [ ] B4 · [ ] B5 · [ ] B6
 - [ ] C1 · [ ] C2 · [ ] C3 · [ ] C4 · [ ] C5

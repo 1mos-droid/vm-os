@@ -20,7 +20,6 @@ HyperOS is a working virtualization host foundation, not yet a finished security
 
 - **Start a VM.** `crosvm` is not built; you must supply a prebuilt binary (see *Packaging `crosvm`* below). There is no base-image import tool, so guest disks are staged by hand.
 - **Run a GUI.** `desktop-shell/` and `vm-control-ui/` build and run in `--mock` mode on a developer machine but are not packaged into `hyperos.img`.
-- **Keep NAT guests off your LAN.** `nat` mode only blocks other VMs (`10.200.0.0/15`); guests can reach the uplink's local network.
 - **Drop root.** `vmm-daemon` and `crosvm` run as root (crosvm keeps its jail/seccomp), and only UID 0 may use the control socket.
 - **Verify boot.** No dm-verity, signed Secure Boot or TPM measurement; no A/B updates.
 - **Restore snapshots, run disposable VMs or capture traffic.** Snapshots can be taken but not restored, listed or deleted through the API.
@@ -57,7 +56,7 @@ scripts/                     # Config/image validator, v1 release runner, GNU17 
 - **Transport:** `/run/hyperos/vmm.sock` (`AF_UNIX`/`SOCK_STREAM`, `root:root`, mode `0600`, parent `/run/hyperos` `0700`, `SO_PEERCRED` UID 0 only)
 - **Framing:** Single-line UTF-8 JSON-RPC 2.0 object terminated by LF (`\n`), max 65,536 bytes; no batches, notifications, positional params, or unknown keys
 - **Methods:** `create_vm`, `start_vm`, `stop_vm`, `pause_vm`, `snapshot_vm`, `set_balloon_ram`, `set_network_mode`, `list_vms`
-- **Network sandboxing:** `isolated` (no virtual NIC), `nat` (per-VM TAP + `nftables` outbound masquerade; currently also reaches the uplink LAN), or `host-only` (per-VM isolated bridge for host–guest traffic only)
+- **Network sandboxing:** `isolated` (no virtual NIC), `nat` (per-VM TAP + `nftables` outbound masquerade to the public internet only; LAN, link-local and other VMs blocked), or `host-only` (per-VM isolated bridge for host–guest traffic only)
 - **Admission control:** Total maximum RAM of running/paused guests must not exceed `MemTotal - 768 MiB` (ZRAM swap is not admission capacity)
 
 ### Persistent Btrfs CoW Storage

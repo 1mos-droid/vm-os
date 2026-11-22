@@ -151,11 +151,8 @@ Network semantics owned by daemon:
 * `isolated`: no virtual NIC, no host/guest or inter-guest network path.
 * `nat`: per-VM TAP/private subnet, host forwarding + masquerade for outbound
   traffic through an existing uplink; no unsolicited inbound or inter-VM traffic.
-  Current behavior: the forward rule only excludes `10.200.0.0/15` (other VMs),
-  so a NAT guest **can reach the uplink's LAN** (router, RFC1918 and link-local
-  hosts) as well as the internet. Rules sit on the forward hook only; there is
-  no per-VM input-hook filter, so guest-to-host traffic relies on the host
-  having no listeners.
+  The guest reaches the public IPv4 internet only; see "NAT semantics" in the
+  v2 section below for the blocked ranges and the input-hook filter.
 * `host-only`: per-VM TAP/private subnet for host–guest communication; no uplink
   forwarding, NAT, or inter-VM communication.
 
