@@ -13,11 +13,14 @@
 //!       disk.raw
 //!     snapshots/<snapshot_id>/
 //!     snapshot-metadata/<snapshot_id>.json
+//!   captures/<vm_id>/
+//!     <capture_id>.pcap
+//!     <capture_id>.json
 //! ```
 
 use crate::rpc::{
-    error_code, is_valid_image_id, is_valid_sha256_hex, is_valid_uuid, BaseImageManifest, RpcError,
-    Snapshot, SnapshotMetadataFile, Vm,
+    error_code, is_valid_image_id, is_valid_sha256_hex, is_valid_uuid, BaseImageManifest, Capture,
+    CaptureState, RpcError, Snapshot, SnapshotMetadataFile, Vm,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -38,7 +41,6 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 /// Never serialized into wire JSON-RPC `Vm` objects (keeping the wire schema 100% verbatim).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVmPolicy {
-    pub ephemeral: bool,
     pub balloon_min_ram_mib: u32,
     pub balloon_max_ram_mib: u32,
     pub vsock_cid: u32,
@@ -58,6 +60,8 @@ pub struct PersistedVmRecord {
 pub struct StorageManager {
     root: PathBuf,
     strict_btrfs: bool,
+    /// Group allowed to read capture files (`hyperos`); `None` keeps everything root-only.
+    access_gid: Option<u32>,
 }
 
 impl StorageManager {
@@ -89,9 +93,36 @@ impl StorageManager {
         let _ = fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700));
         let _ = fs::set_permissions(&inst_dir, fs::Permissions::from_mode(0o700));
 
-        let mgr = Self { root, strict_btrfs };
+        let mgr = Self {
+            root,
+            strict_btrfs,
+            access_gid: None,
+        };
         mgr.recover_interrupted_staging()?;
         Ok(mgr)
+    }
+
+    /// Let `gid` traverse the storage root and read captures (`ARCHITECTURE.md`:
+    /// root `root:hyperos 0710`, `captures/` `root:hyperos 0750`). `base-images/` and
+    /// `instances/` stay `0700`.
+    pub fn with_access_group(mut self, gid: Option<u32>) -> Result<Self, String> {
+        self.access_gid = gid;
+        let captures = self.captures_dir();
+        fs::create_dir_all(&captures).map_err(|e| format!("failed to create captures dir: {e}"))?;
+        let (root_mode, captures_mode) = if gid.is_some() {
+            (0o710, 0o750)
+        } else {
+            (0o700, 0o700)
+        };
+        for (dir, mode) in [(&self.root, root_mode), (&captures, captures_mode)] {
+            if let Some(g) = gid {
+                std::os::unix::fs::chown(dir, None, Some(g))
+                    .map_err(|e| format!("failed to set storage group: {e}"))?;
+            }
+            fs::set_permissions(dir, fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("failed to set storage mode {mode:o}: {e}"))?;
+        }
+        Ok(self)
     }
 
     pub fn root(&self) -> &Path {
@@ -136,6 +167,24 @@ impl StorageManager {
             .join(format!("{snapshot_id}.json"))
     }
 
+    pub fn captures_dir(&self) -> PathBuf {
+        self.root.join("captures")
+    }
+
+    pub fn capture_vm_dir(&self, vm_id: &str) -> PathBuf {
+        self.captures_dir().join(vm_id)
+    }
+
+    pub fn capture_pcap_path(&self, vm_id: &str, capture_id: &str) -> PathBuf {
+        self.capture_vm_dir(vm_id)
+            .join(format!("{capture_id}.pcap"))
+    }
+
+    pub fn capture_metadata_path(&self, vm_id: &str, capture_id: &str) -> PathBuf {
+        self.capture_vm_dir(vm_id)
+            .join(format!("{capture_id}.json"))
+    }
+
     /// Clean up any `.staging-*` directories or `.tmp.*` files left behind by an interrupted operation.
     pub fn recover_interrupted_staging(&self) -> Result<(), String> {
         let inst_dir = self.instances_dir();
@@ -150,6 +199,7 @@ impl StorageManager {
                 }
                 if path.is_dir() {
                     // Clean up interrupted snapshot staging or temp metadata inside instance dirs.
+                    let snap_meta_dir = path.join("snapshot-metadata");
                     for sub in ["snapshots", "snapshot-metadata"] {
                         let sub_dir = path.join(sub);
                         if let Ok(sub_entries) = fs::read_dir(&sub_dir) {
@@ -158,13 +208,24 @@ impl StorageManager {
                                 let sn_str = sn.to_string_lossy();
                                 if sn_str.starts_with(".staging-") || sn_str.contains(".tmp.") {
                                     self.remove_tree_or_subvol(&se.path());
+                                } else if sub == "snapshots"
+                                    && !snap_meta_dir.join(format!("{sn_str}.json")).is_file()
+                                {
+                                    // Uncommitted (no metadata) or half-deleted snapshot.
+                                    self.remove_tree_or_subvol(&se.path());
                                 }
                             }
                         }
                     }
                     if let Ok(meta_entries) = fs::read_dir(&path) {
                         for me in meta_entries.flatten() {
-                            if me.file_name().to_string_lossy().contains(".tmp.") {
+                            let me_name = me.file_name();
+                            let me_str = me_name.to_string_lossy();
+                            if me_str.starts_with(".staging-") {
+                                // Interrupted restore: either never swapped in, or the
+                                // old `current/` after a completed swap.
+                                self.remove_tree_or_subvol(&me.path());
+                            } else if me_str.contains(".tmp.") {
                                 let _ = fs::remove_file(me.path());
                             }
                         }
@@ -424,6 +485,228 @@ impl StorageManager {
         res
     }
 
+    /// List committed snapshots of a VM, sorted by `created_at`, then `snapshot_id`.
+    pub fn list_snapshots(&self, vm_id: &str) -> Result<Vec<Snapshot>, RpcError> {
+        let meta_dir = self.instance_dir(vm_id).join("snapshot-metadata");
+        let mut snapshots = Vec::new();
+        let entries = match fs::read_dir(&meta_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(snapshots),
+            Err(err) => return Err(map_io_err(err)),
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(snapshot_id) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+                continue;
+            };
+            if !is_valid_uuid(snapshot_id) || !self.snapshot_dir(vm_id, snapshot_id).is_dir() {
+                continue;
+            }
+            let text = fs::read_to_string(entry.path()).map_err(map_io_err)?;
+            let doc: SnapshotMetadataFile = serde_json::from_str(&text)
+                .map_err(|_| RpcError::new(error_code::IO_FAILURE, "corrupt snapshot metadata"))?;
+            snapshots.push(doc.snapshot);
+        }
+        snapshots.sort_by(|a, b| {
+            (a.created_at.as_str(), a.snapshot_id.as_str())
+                .cmp(&(b.created_at.as_str(), b.snapshot_id.as_str()))
+        });
+        Ok(snapshots)
+    }
+
+    fn require_snapshot(&self, vm_id: &str, snapshot_id: &str) -> Result<PathBuf, RpcError> {
+        let dir = self.snapshot_dir(vm_id, snapshot_id);
+        if !is_valid_uuid(snapshot_id)
+            || !dir.is_dir()
+            || !self.snapshot_metadata_path(vm_id, snapshot_id).is_file()
+        {
+            return Err(RpcError::new(error_code::NOT_FOUND, "snapshot not found"));
+        }
+        Ok(dir)
+    }
+
+    /// Replace `current/` with a writable copy of a snapshot. The swap is a single
+    /// `renameat2(RENAME_EXCHANGE)`, so `current/` is either fully old or fully restored.
+    pub fn restore_snapshot(&self, vm_id: &str, snapshot_id: &str) -> Result<(), RpcError> {
+        let snap_dir = self.require_snapshot(vm_id, snapshot_id)?;
+        let current = self.instance_current_dir(vm_id);
+        let staging = self.instance_dir(vm_id).join(".staging-current");
+        self.remove_tree_or_subvol(&staging);
+
+        let res = (|| -> Result<(), RpcError> {
+            let btrfs = Command::new("btrfs")
+                .args(["subvolume", "snapshot"])
+                .arg(&snap_dir)
+                .arg(&staging)
+                .output();
+            let btrfs_ok = match btrfs {
+                Ok(o) if o.status.success() => true,
+                Ok(o) if self.strict_btrfs => {
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_ascii_lowercase();
+                    return Err(if stderr.contains("no space left") {
+                        RpcError::new(
+                            error_code::INSUFFICIENT_RESOURCES,
+                            "insufficient storage space for restore",
+                        )
+                    } else {
+                        RpcError::new(
+                            error_code::IO_FAILURE,
+                            "failed to create writable snapshot for restore",
+                        )
+                    });
+                }
+                Err(_) if self.strict_btrfs => {
+                    return Err(RpcError::new(
+                        error_code::UNAVAILABLE_CAPABILITY,
+                        "btrfs utility unavailable for restore",
+                    ));
+                }
+                _ => false,
+            };
+            if !btrfs_ok {
+                // Dry-run fallback on non-Btrfs test filesystems.
+                fs::create_dir_all(&staging).map_err(map_io_err)?;
+                let src_disk = snap_dir.join("disk.raw");
+                if src_disk.is_file() {
+                    self.clone_disk_reflink(&src_disk, &staging.join("disk.raw"))?;
+                }
+            }
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).map_err(map_io_err)?;
+            let disk = staging.join("disk.raw");
+            if disk.is_file() {
+                fs::set_permissions(&disk, fs::Permissions::from_mode(0o600))
+                    .map_err(map_io_err)?;
+            }
+
+            if current.exists() {
+                rename_exchange(&staging, &current).map_err(map_io_err)?;
+            } else {
+                fs::rename(&staging, &current).map_err(map_io_err)?;
+            }
+            sync_dir(&self.instance_dir(vm_id))
+        })();
+
+        // After a successful swap `staging` holds the old `current/`; on failure it
+        // holds the partial copy. Either way it goes.
+        self.remove_tree_or_subvol(&staging);
+        res
+    }
+
+    /// Delete a snapshot: metadata first (it disappears from listings atomically),
+    /// then the subvolume. A crash in between leaves an orphan removed at startup.
+    pub fn delete_snapshot(&self, vm_id: &str, snapshot_id: &str) -> Result<(), RpcError> {
+        let snap_dir = self.require_snapshot(vm_id, snapshot_id)?;
+        let meta = self.snapshot_metadata_path(vm_id, snapshot_id);
+        fs::remove_file(&meta).map_err(map_io_err)?;
+        if let Some(parent) = meta.parent() {
+            sync_dir(parent)?;
+        }
+        self.remove_tree_or_subvol(&snap_dir);
+        Ok(())
+    }
+
+    fn apply_capture_access(&self, path: &Path, mode: u32) -> Result<(), RpcError> {
+        if let Some(g) = self.access_gid {
+            std::os::unix::fs::chown(path, None, Some(g)).map_err(map_io_err)?;
+        }
+        let mode = if self.access_gid.is_some() {
+            mode
+        } else {
+            mode & 0o700
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(map_io_err)
+    }
+
+    /// Create a new, empty pcap file for a capture (`root:hyperos 0640`).
+    pub fn create_capture_file(&self, vm_id: &str, capture_id: &str) -> Result<File, RpcError> {
+        let dir = self.capture_vm_dir(vm_id);
+        fs::create_dir_all(&dir).map_err(map_io_err)?;
+        self.apply_capture_access(&dir, 0o750)?;
+        let path = self.capture_pcap_path(vm_id, capture_id);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(map_io_err)?;
+        self.apply_capture_access(&path, 0o640)?;
+        Ok(file)
+    }
+
+    /// Atomically persist a Capture object next to its pcap file.
+    pub fn save_capture(&self, capture: &Capture) -> Result<(), RpcError> {
+        let path = self.capture_metadata_path(&capture.vm_id, &capture.capture_id);
+        write_json_atomic(&path, capture)?;
+        self.apply_capture_access(&path, 0o640)
+    }
+
+    /// Load a VM's persisted captures, sorted by `started_at`, then `capture_id`.
+    pub fn list_captures(&self, vm_id: &str) -> Result<Vec<Capture>, RpcError> {
+        let mut captures = Vec::new();
+        let entries = match fs::read_dir(self.capture_vm_dir(vm_id)) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(captures),
+            Err(err) => return Err(map_io_err(err)),
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+                continue;
+            };
+            if !is_valid_uuid(id) {
+                continue;
+            }
+            let text = fs::read_to_string(entry.path()).map_err(map_io_err)?;
+            let capture: Capture = serde_json::from_str(&text)
+                .map_err(|_| RpcError::new(error_code::IO_FAILURE, "corrupt capture metadata"))?;
+            captures.push(capture);
+        }
+        captures.sort_by(|a, b| {
+            (a.started_at.as_str(), a.capture_id.as_str())
+                .cmp(&(b.started_at.as_str(), b.capture_id.as_str()))
+        });
+        Ok(captures)
+    }
+
+    /// Delete a capture's metadata and pcap file. Returns -32001 if it does not exist.
+    pub fn delete_capture(&self, vm_id: &str, capture_id: &str) -> Result<(), RpcError> {
+        let meta = self.capture_metadata_path(vm_id, capture_id);
+        if !is_valid_uuid(capture_id) || !meta.is_file() {
+            return Err(RpcError::new(error_code::NOT_FOUND, "capture not found"));
+        }
+        fs::remove_file(&meta).map_err(map_io_err)?;
+        let _ = fs::remove_file(self.capture_pcap_path(vm_id, capture_id));
+        sync_dir(&self.capture_vm_dir(vm_id))
+    }
+
+    /// At startup, mark captures left `running` by a previous daemon as `stopped`,
+    /// recording the pcap file's real size.
+    pub fn reconcile_captures(&self) -> Result<(), String> {
+        let Ok(vm_dirs) = fs::read_dir(self.captures_dir()) else {
+            return Ok(());
+        };
+        for vm_dir in vm_dirs.flatten() {
+            let vm_id = vm_dir.file_name().to_string_lossy().into_owned();
+            if !is_valid_uuid(&vm_id) {
+                continue;
+            }
+            let captures = self
+                .list_captures(&vm_id)
+                .map_err(|e| format!("failed to load captures for {vm_id}: {e}"))?;
+            for mut capture in captures {
+                if capture.state != CaptureState::Running {
+                    continue;
+                }
+                capture.state = CaptureState::Stopped;
+                capture.bytes = fs::metadata(self.capture_pcap_path(&vm_id, &capture.capture_id))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                self.save_capture(&capture)
+                    .map_err(|e| format!("failed to reconcile capture: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Load all persisted VM records from `instances/<vm_id>/metadata.json`.
     pub fn load_all_vms(&self) -> Result<Vec<PersistedVmRecord>, String> {
         let mut records = Vec::new();
@@ -459,7 +742,6 @@ impl StorageManager {
                     .map_err(|e| format!("corrupt daemon policy for {vm_id}: {e}"))?
             } else {
                 DaemonVmPolicy {
-                    ephemeral: false,
                     balloon_min_ram_mib: crate::rpc::MIN_VM_RAM_MIB,
                     balloon_max_ram_mib: vm.ram_mib,
                     vsock_cid: 3,
@@ -568,6 +850,33 @@ impl StorageManager {
                 let _ = fs::remove_file(path);
             }
         }
+    }
+}
+
+/// Atomically swap two paths with `renameat2(RENAME_EXCHANGE)` (raw syscall, so it
+/// works on both glibc and musl).
+fn rename_exchange(a: &Path, b: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    const RENAME_EXCHANGE: libc::c_uint = 1 << 1;
+    let a = CString::new(a.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let b = CString::new(b.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -730,6 +1039,7 @@ mod tests {
         let strict_mgr = StorageManager {
             root: tmp.clone(),
             strict_btrfs: true,
+            access_gid: None,
         };
         if verify_btrfs_mount(&tmp).is_err() {
             let res = strict_mgr.clone_disk_reflink(&src, &dst);
@@ -755,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn provisions_persists_snapshots_and_deletes_ephemeral_overlay() {
+    fn provisions_persists_snapshots_and_deletes_disposable_overlay() {
         let tmp = std::env::temp_dir().join(format!("hyperos-prov-{}", uuid::Uuid::new_v4()));
         let mgr = StorageManager::new(&tmp, false).unwrap();
         create_test_base_image(&tmp, "linux-demo", b"bootable-raw-image");
@@ -769,9 +1079,9 @@ mod tests {
             balloon_target_mib: 512,
             network_mode: NetworkMode::Isolated,
             state: VmState::Stopped,
+            disposable: true,
         };
         let policy = DaemonVmPolicy {
-            ephemeral: true,
             balloon_min_ram_mib: 256,
             balloon_max_ram_mib: 512,
             vsock_cid: 3,
@@ -799,6 +1109,168 @@ mod tests {
 
         mgr.delete_vm_overlay(&vm.vm_id).unwrap();
         assert!(!mgr.instance_disk_path(&vm.vm_id).exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn lists_restores_and_deletes_snapshots_atomically() {
+        let tmp = std::env::temp_dir().join(format!("hyperos-restore-{}", uuid::Uuid::new_v4()));
+        let mgr = StorageManager::new(&tmp, false).unwrap();
+        create_test_base_image(&tmp, "linux-demo", b"base-disk");
+        let vm = Vm {
+            vm_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            name: "demo".to_string(),
+            base_image_id: "linux-demo".to_string(),
+            vcpu_count: 1,
+            ram_mib: 512,
+            balloon_target_mib: 512,
+            network_mode: NetworkMode::Isolated,
+            state: VmState::Stopped,
+            disposable: false,
+        };
+        let policy = DaemonVmPolicy {
+            balloon_min_ram_mib: 128,
+            balloon_max_ram_mib: 512,
+            vsock_cid: 3,
+            last_pid: None,
+        };
+        mgr.provision_vm_instance(&vm, &policy).unwrap();
+        let disk = mgr.instance_disk_path(&vm.vm_id);
+
+        let snap = |id: &str, at: &str| Snapshot {
+            snapshot_id: id.to_string(),
+            vm_id: vm.vm_id.clone(),
+            created_at: at.to_string(),
+        };
+        // Taken out of order to prove sorting by created_at.
+        let later = snap(
+            "ffffffff-0000-4000-8000-000000000000",
+            "2026-11-22T00:00:01Z",
+        );
+        fs::write(&disk, b"state-two").unwrap();
+        mgr.create_cold_snapshot(&vm, &later).unwrap();
+        let earlier = snap(
+            "00000000-0000-4000-8000-000000000000",
+            "2026-11-22T00:00:00Z",
+        );
+        fs::write(&disk, b"state-one").unwrap();
+        mgr.create_cold_snapshot(&vm, &earlier).unwrap();
+        assert_eq!(
+            mgr.list_snapshots(&vm.vm_id).unwrap(),
+            vec![earlier.clone(), later.clone()]
+        );
+
+        fs::write(&disk, b"dirty-changes").unwrap();
+        mgr.restore_snapshot(&vm.vm_id, &later.snapshot_id).unwrap();
+        assert_eq!(fs::read(&disk).unwrap(), b"state-two");
+        assert!(!mgr
+            .instance_dir(&vm.vm_id)
+            .join(".staging-current")
+            .exists());
+        // The restored disk is writable and the snapshot itself is untouched.
+        fs::write(&disk, b"after-restore").unwrap();
+        mgr.restore_snapshot(&vm.vm_id, &earlier.snapshot_id)
+            .unwrap();
+        assert_eq!(fs::read(&disk).unwrap(), b"state-one");
+
+        let missing = "11111111-0000-4000-8000-000000000000";
+        assert_eq!(
+            mgr.restore_snapshot(&vm.vm_id, missing).unwrap_err().code,
+            error_code::NOT_FOUND
+        );
+        assert_eq!(
+            mgr.restore_snapshot(&vm.vm_id, "../../etc")
+                .unwrap_err()
+                .code,
+            error_code::NOT_FOUND
+        );
+
+        mgr.delete_snapshot(&vm.vm_id, &earlier.snapshot_id)
+            .unwrap();
+        assert_eq!(mgr.list_snapshots(&vm.vm_id).unwrap(), vec![later.clone()]);
+        assert!(!mgr.snapshot_dir(&vm.vm_id, &earlier.snapshot_id).exists());
+        assert_eq!(
+            mgr.delete_snapshot(&vm.vm_id, &earlier.snapshot_id)
+                .unwrap_err()
+                .code,
+            error_code::NOT_FOUND
+        );
+
+        // Startup recovery removes an interrupted restore and an orphaned snapshot dir.
+        let staging = mgr.instance_dir(&vm.vm_id).join(".staging-current");
+        fs::create_dir_all(&staging).unwrap();
+        let orphan = mgr.snapshot_dir(&vm.vm_id, missing);
+        fs::create_dir_all(&orphan).unwrap();
+        let _again = StorageManager::new(&tmp, false).unwrap();
+        assert!(!staging.exists());
+        assert!(!orphan.exists());
+        assert!(mgr.snapshot_dir(&vm.vm_id, &later.snapshot_id).is_dir());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn persists_reconciles_and_deletes_captures() {
+        let tmp = std::env::temp_dir().join(format!("hyperos-cap-{}", uuid::Uuid::new_v4()));
+        let mgr = StorageManager::new(&tmp, false)
+            .unwrap()
+            .with_access_group(None)
+            .unwrap();
+        let vm_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let capture = Capture {
+            capture_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            vm_id: vm_id.clone(),
+            started_at: "2026-11-22T00:00:00Z".to_string(),
+            state: CaptureState::Running,
+            bytes: 0,
+        };
+        let mut file = mgr
+            .create_capture_file(&vm_id, &capture.capture_id)
+            .unwrap();
+        file.write_all(&[0u8; 40]).unwrap();
+        drop(file);
+        assert!(mgr
+            .create_capture_file(&vm_id, &capture.capture_id)
+            .is_err());
+        mgr.save_capture(&capture).unwrap();
+
+        // Without an access group nothing is group-readable.
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&tmp), 0o700);
+        assert_eq!(mode(&mgr.captures_dir()), 0o700);
+        assert_eq!(
+            mode(&mgr.capture_pcap_path(&vm_id, &capture.capture_id)),
+            0o600
+        );
+
+        mgr.reconcile_captures().unwrap();
+        let listed = mgr.list_captures(&vm_id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, CaptureState::Stopped);
+        assert_eq!(listed[0].bytes, 40);
+
+        mgr.delete_capture(&vm_id, &capture.capture_id).unwrap();
+        assert!(mgr.list_captures(&vm_id).unwrap().is_empty());
+        assert!(!mgr.capture_pcap_path(&vm_id, &capture.capture_id).exists());
+        assert_eq!(
+            mgr.delete_capture(&vm_id, &capture.capture_id)
+                .unwrap_err()
+                .code,
+            error_code::NOT_FOUND
+        );
+
+        // With an access group (our own primary GID, so no privilege is needed) the
+        // root becomes traverse-only and captures group-readable.
+        let gid = unsafe { libc::getegid() };
+        let mgr = mgr.with_access_group(Some(gid)).unwrap();
+        assert_eq!(mode(&tmp), 0o710);
+        assert_eq!(mode(&mgr.captures_dir()), 0o750);
+        assert_eq!(mode(&mgr.instances_dir()), 0o700);
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        drop(mgr.create_capture_file(&vm_id, &id).unwrap());
+        assert_eq!(mode(&mgr.capture_pcap_path(&vm_id, &id)), 0o640);
+        assert_eq!(mode(&mgr.capture_vm_dir(&vm_id)), 0o750);
 
         let _ = fs::remove_dir_all(&tmp);
     }

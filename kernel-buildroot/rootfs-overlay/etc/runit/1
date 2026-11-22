@@ -17,3 +17,29 @@ for service in zram ksm storage vmm-daemon; do
     mkdir -p "/run/runit/$service"
     ln -s "/etc/sv/$service" "/run/service/$service"
 done
+# Explicit boot request, used by the offline release runner after importing a guest.
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        hyperos.boot_image=*)
+            printf '%s\n' "${param#hyperos.boot_image=}" > /run/hyperos/boot-image
+            mkdir -p /run/runit/boot-vm
+            ln -s /etc/sv/boot-vm /run/service/boot-vm
+            ;;
+    esac
+done
+# KVM is root:kvm 0660 so crosvm can later drop to unprivileged per-VM UIDs in the
+# kvm group (contract v2, A2); until then crosvm still runs as root.
+if [ -c /dev/kvm ]; then
+    chgrp kvm /dev/kvm
+    chmod 0660 /dev/kvm
+fi
+# Graphical services are present only in builds that explicitly enable the UI.
+if [ -x /usr/bin/desktop-shell ] && [ -x /sbin/udevd ] && [ -x /usr/bin/seatd ]; then
+    mkdir -p /run/user/1000 /run/udev
+    chown desktop:hyperos /run/user/1000
+    chmod 0700 /run/user/1000
+    for service in udev seatd desktop-shell; do
+        mkdir -p "/run/runit/$service"
+        ln -s "/etc/sv/$service" "/run/service/$service"
+    done
+fi

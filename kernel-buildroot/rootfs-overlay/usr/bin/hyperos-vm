@@ -1,0 +1,23 @@
+#!/bin/sh
+# Create and start an isolated VM through the daemon's existing RPC boundary.
+set -eu
+if [ "$#" -ne 1 ]; then
+    echo 'usage: hyperos-vm <imported-image-id>' >&2
+    exit 2
+fi
+image=$1
+printf '%s' "$image" | jq -eRs 'test("^[A-Za-z0-9_-]{1,64}$")' >/dev/null
+rpc() {
+    request=$1
+    response=$(printf '%s\n' "$request" | socat -t 1 -T 30 - UNIX-CONNECT:/run/hyperos/vmm.sock)
+    if ! printf '%s\n' "$response" | jq -e 'select(.jsonrpc == "2.0" and .id == "boot-1" and has("result") and (has("error") | not)) | .result'; then
+        printf 'VM request failed: %s\n' "$response" >&2
+        return 1
+    fi
+}
+request=$(jq -cn --arg image "$image" '{jsonrpc:"2.0",id:"boot-1",method:"create_vm",params:{name:$image,base_image_id:$image,vcpu_count:1,ram_mib:512,network_mode:"isolated",disposable:false}}')
+vm=$(rpc "$request")
+id=$(printf '%s\n' "$vm" | jq -er '.vm_id')
+echo "Created VM $id" >&2
+request=$(jq -cn --arg id "$id" '{jsonrpc:"2.0",id:"boot-1",method:"start_vm",params:{vm_id:$id}}')
+rpc "$request"

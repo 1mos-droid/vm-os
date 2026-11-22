@@ -3,10 +3,12 @@
 //! All system invocations use `std::process::Command` with explicit argument arrays;
 //! request values are never interpolated into a shell.
 
+use crate::capture::{AfPacketSource, PacketSource};
 use crate::rpc::{error_code, NetworkMode, RpcError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Active host network allocation attached to a running/paused VM.
@@ -26,6 +28,8 @@ pub struct NetworkAllocation {
 pub trait NetworkController: Send + Sync {
     fn setup(&self, vm_id: &str, mode: NetworkMode) -> Result<Option<NetworkAllocation>, RpcError>;
     fn teardown(&self, alloc: &NetworkAllocation);
+    /// Open a frame source seeing both directions of the VM's TAP.
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError>;
 }
 
 fn short_id(vm_id: &str) -> String {
@@ -184,18 +188,45 @@ impl LinuxNetworkController {
     }
 }
 
-/// Generate an isolated `nftables` NAT ruleset allowing outbound uplink masquerade
-/// while blocking inter-VM traffic (`10.200.0.0/15`) and unsolicited inbound connections.
+/// Non-global IPv4 destinations a `nat` guest must never reach (`ARCHITECTURE.md`,
+/// NAT semantics): this-network, private, CGNAT, loopback, link-local, IETF protocol
+/// assignments, benchmarking, multicast and reserved (including broadcast).
+pub const NAT_BLOCKED_IPV4: &[&str] = &[
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+];
+
+/// Generate the `nftables` NAT ruleset: the guest may reach the public IPv4 internet
+/// through `uplink` (masqueraded) and nothing else. Guest traffic to non-global IPv4
+/// ranges (the uplink LAN, other VMs, link-local, multicast) and all guest IPv6 is
+/// dropped; the input chain drops unsolicited guest traffic addressed to the host.
 pub fn build_nat_nft_ruleset(alloc: &NetworkAllocation, uplink: &str) -> String {
     let subnet = format!("10.200.{}.0/30", alloc.subnet_slot);
+    let blocked = NAT_BLOCKED_IPV4.join(", ");
     format!(
         "table inet {tbl} {{\n\
            chain forward {{\n\
              type filter hook forward priority 0; policy accept;\n\
-             iifname \"{tap}\" oifname \"{uplink}\" ip saddr {subnet} ip daddr != 10.200.0.0/15 accept\n\
+             iifname \"{tap}\" meta nfproto ipv6 drop\n\
+             iifname \"{tap}\" ip daddr {{ {blocked} }} drop\n\
+             iifname \"{tap}\" oifname \"{uplink}\" ip saddr {subnet} accept\n\
              iifname \"{uplink}\" oifname \"{tap}\" ct state established,related accept\n\
              iifname \"{tap}\" drop\n\
              oifname \"{tap}\" drop\n\
+           }}\n\
+           chain input {{\n\
+             type filter hook input priority 0; policy accept;\n\
+             iifname \"{tap}\" ct state established,related accept\n\
+             iifname \"{tap}\" drop\n\
            }}\n\
            chain postrouting {{\n\
              type nat hook postrouting priority srcnat; policy accept;\n\
@@ -206,6 +237,7 @@ pub fn build_nat_nft_ruleset(alloc: &NetworkAllocation, uplink: &str) -> String 
         tap = alloc.tap_name,
         uplink = uplink,
         subnet = subnet,
+        blocked = blocked,
     )
 }
 
@@ -295,6 +327,17 @@ impl NetworkController for LinuxNetworkController {
         let mut guard = self.used_slots.lock().unwrap();
         guard.remove(&alloc.subnet_slot);
     }
+
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError> {
+        AfPacketSource::open(&alloc.tap_name)
+            .map(|s| Box::new(s) as Box<dyn PacketSource>)
+            .map_err(|_| {
+                RpcError::new(
+                    error_code::IO_FAILURE,
+                    "failed to open packet capture socket",
+                )
+            })
+    }
 }
 
 /// In-memory mock network controller for `--dry-run` and CI tests (requires no `CAP_NET_ADMIN`).
@@ -303,9 +346,61 @@ pub struct MockNetworkController {
     used_slots: Mutex<HashSet<u8>>,
     active: Mutex<Vec<NetworkAllocation>>,
     torn_down: Mutex<Vec<NetworkAllocation>>,
+    /// Frames queued per TAP name, consumed by mock capture sources.
+    frames: Mutex<HashMap<String, FrameQueue>>,
+}
+
+/// Frames waiting to be read by one mock capture source.
+type FrameQueue = Arc<Mutex<VecDeque<Vec<u8>>>>;
+
+/// Mock capture source draining frames queued with `MockNetworkController::inject_frame`.
+struct MockPacketSource(FrameQueue);
+
+impl PacketSource for MockPacketSource {
+    fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<Option<(usize, usize)>> {
+        let next = self.0.lock().unwrap().pop_front();
+        match next {
+            Some(frame) => {
+                let n = frame.len().min(buf.len());
+                buf[..n].copy_from_slice(&frame[..n]);
+                Ok(Some((n, frame.len())))
+            }
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl MockNetworkController {
+    /// Queue a frame as if it crossed the TAP of `vm_id`'s active allocation.
+    /// Returns `false` if the VM has no NIC.
+    pub fn inject_frame(&self, vm_id: &str, frame: Vec<u8>) -> bool {
+        let Some(tap) = self
+            .active
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.vm_id == vm_id)
+            .map(|a| a.tap_name.clone())
+        else {
+            return false;
+        };
+        self.frame_queue(&tap).lock().unwrap().push_back(frame);
+        true
+    }
+
+    fn frame_queue(&self, tap: &str) -> FrameQueue {
+        Arc::clone(
+            self.frames
+                .lock()
+                .unwrap()
+                .entry(tap.to_string())
+                .or_default(),
+        )
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -339,7 +434,14 @@ impl NetworkController for MockNetworkController {
             .lock()
             .unwrap()
             .retain(|a| a.tap_name != alloc.tap_name);
+        self.frames.lock().unwrap().remove(&alloc.tap_name);
         self.torn_down.lock().unwrap().push(alloc.clone());
+    }
+
+    fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError> {
+        Ok(Box::new(MockPacketSource(
+            self.frame_queue(&alloc.tap_name),
+        )))
     }
 }
 
@@ -389,7 +491,37 @@ mod tests {
             build_allocation("b6f51eed-8dc7-47f6-a8e7-81b6ae783a21", NetworkMode::Nat, 7);
         let nat_rules = build_nat_nft_ruleset(&nat_alloc, "eth0");
         assert!(nat_rules.contains("table inet hyperos_b6f51eed"));
-        assert!(nat_rules.contains("ip daddr != 10.200.0.0/15 accept"));
+        // Guest traffic to every non-global IPv4 range (uplink LAN, other VMs,
+        // link-local, multicast) and all guest IPv6 is dropped before the accept.
+        let drop_v4 = nat_rules
+            .lines()
+            .position(|l| l.contains("iifname \"hvmtapb6f51eed\" ip daddr {"))
+            .expect("non-global IPv4 drop rule");
+        let drop_v6 = nat_rules
+            .lines()
+            .position(|l| l.contains("iifname \"hvmtapb6f51eed\" meta nfproto ipv6 drop"))
+            .expect("guest IPv6 drop rule");
+        let accept = nat_rules
+            .lines()
+            .position(|l| l.contains("ip saddr 10.200.7.0/30 accept"))
+            .expect("uplink accept rule");
+        assert!(drop_v4 < accept && drop_v6 < accept);
+        let drop_line = nat_rules.lines().nth(drop_v4).unwrap();
+        for range in [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "100.64.0.0/10",
+            "224.0.0.0/4",
+            "240.0.0.0/4",
+        ] {
+            assert!(drop_line.contains(range), "missing blocked range {range}");
+        }
+        assert!(drop_line.trim_end().ends_with("} drop"));
+        assert!(!nat_rules.contains("!= 10.200.0.0/15"));
+        // Host is unreachable from the guest except replies.
+        assert!(nat_rules.contains("type filter hook input priority 0"));
         assert!(nat_rules.contains("ct state established,related accept"));
         assert!(nat_rules.contains("oifname \"eth0\" ip saddr 10.200.7.0/30 masquerade"));
         assert!(nat_rules.contains("iifname \"hvmtapb6f51eed\" drop"));

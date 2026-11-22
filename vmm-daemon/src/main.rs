@@ -1,7 +1,8 @@
 //! HyperOS privileged VMM control-plane daemon (`vmm-daemon`).
 //!
 //! - Production invocation (`vmm-daemon`, zero arguments): binds `/run/hyperos/vmm.sock`
-//!   with umask `077`, mode `0600`, `SO_PEERCRED` UID 0 only, strict Btrfs CoW storage at
+//!   with umask `077`, `SO_PEERCRED` UID 0 plus members of the `hyperos` group (socket
+//!   `root:hyperos 0660`; root-only `0600` if the group is missing), strict Btrfs CoW storage at
 //!   `/var/lib/hyperos`, `/dev/kvm`-backed `/usr/bin/crosvm`, and clean `SIGTERM` shutdown.
 //! - Testing / CI invocation (`vmm-daemon --dry-run [--socket PATH] [--storage-dir DIR]`):
 //!   uses the in-memory mock hypervisor and mock network sandbox controller so the full
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
+use vmm_daemon::auth::{PeerPolicy, CONTROL_GROUP};
 use vmm_daemon::hypervisor::{CrosvmController, HypervisorController, MockHypervisor};
 use vmm_daemon::manager::{HostResources, VmManager};
 use vmm_daemon::network::{LinuxNetworkController, MockNetworkController, NetworkController};
@@ -113,8 +115,8 @@ async fn run() -> Result<(), String> {
         libc::umask(0o077);
     }
 
-    let allowed_uid = if cfg.dry_run {
-        unsafe { libc::geteuid() }
+    let policy = if cfg.dry_run {
+        PeerPolicy::uid_only(unsafe { libc::geteuid() })
     } else {
         let euid = unsafe { libc::geteuid() };
         if euid != 0 {
@@ -123,10 +125,15 @@ async fn run() -> Result<(), String> {
                     .to_string(),
             );
         }
-        0
+        let policy = PeerPolicy::production();
+        if policy.gid.is_none() {
+            eprintln!("vmm-daemon: group '{CONTROL_GROUP}' not found; control socket is root-only");
+        }
+        policy
     };
 
-    let storage = StorageManager::new(&cfg.storage_root, !cfg.dry_run)?;
+    let storage =
+        StorageManager::new(&cfg.storage_root, !cfg.dry_run)?.with_access_group(policy.gid)?;
     let network: Arc<dyn NetworkController> = if cfg.dry_run {
         Arc::new(MockNetworkController::new())
     } else {
@@ -148,7 +155,7 @@ async fn run() -> Result<(), String> {
         cfg.dry_run,
     )?;
 
-    let server = BoundRpcServer::bind(&cfg.socket_path, allowed_uid)?;
+    let server = BoundRpcServer::bind(&cfg.socket_path, policy)?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let mut sigterm = signal(SignalKind::terminate())

@@ -16,7 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate source configuration
-        run: scripts/validate-configs.sh
+        run: |
+          scripts/validate-configs.sh
+          python3 scripts/test-image-tools.py
 
   build:
     needs: validate
@@ -41,7 +43,7 @@ jobs:
       - name: Install build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex cpio rsync file wget unzip python3 libncurses-dev libssl-dev
+          sudo apt-get install -y build-essential bc bison flex cpio rsync file wget unzip python3 libncurses-dev libssl-dev libclang-dev clang pkg-config
       - name: Cache Buildroot downloads
         uses: actions/cache@v4
         with:
@@ -99,10 +101,19 @@ jobs:
           test -s output/target/boot/bzImage
           test -x output/target/sbin/runit
           test -x output/target/usr/bin/vmm-daemon
+          test -x output/target/usr/bin/crosvm
+          test -s output/target/usr/share/policy/crosvm/common_device.policy
+          test -x output/target/usr/bin/hyperos-vm
           test -x output/target/usr/sbin/nft || test -x output/target/sbin/nft
           test -x output/target/sbin/ip || test -x output/target/usr/sbin/ip
           test "$(readlink output/target/sbin/init)" = runit
           test "$(readlink output/target/bin/sh)" = dash
+      - name: Check crosvm target loader and supported launch flags
+        run: |
+          sudo chroot output/target /usr/bin/crosvm --version
+          sudo chroot output/target /usr/bin/crosvm run --help > output/crosvm-run-help.txt
+          grep -F -e '--pivot-root' output/crosvm-run-help.txt
+          grep -F -e '--seccomp-policy-dir' output/crosvm-run-help.txt
       - name: Smoke-test packaged target vmm-daemon (list_vms over AF_UNIX)
         run: |
           python3 - <<'PY'
@@ -155,5 +166,6 @@ jobs:
             output/images/initramfs.cpio.zst
             output/images/efi-part/EFI/BOOT/BOOTX64.EFI
             output/target/usr/bin/vmm-daemon
+            output/target/usr/bin/crosvm
             output/.config
             output/build/linux-6.12.20/.config

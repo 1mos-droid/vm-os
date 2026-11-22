@@ -2,10 +2,11 @@
 
 use crate::client::{ClientError, VmmBackend};
 use crate::rpc::{
-    encode_frame, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name, CreateVmParams,
+    encode_frame, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name, Capture,
+    CaptureState, CreateVmParams, EmptyResult, ListCapturesResult, ListSnapshotsResult,
     ListVmsResult, NetworkMode, RpcError, RpcMethodCall, RpcMethodEnvelope, RpcResponse, Snapshot,
-    Vm, VmState, HOST_RAM_RESERVE_MIB, MAX_FRAME_BYTES, MAX_VCPU_COUNT, MAX_VM_RAM_MIB,
-    MIN_VCPU_COUNT, MIN_VM_RAM_MIB,
+    Vm, VmState, CAPTURE_MAX_BYTES, HOST_RAM_RESERVE_MIB, MAX_FRAME_BYTES, MAX_VCPU_COUNT,
+    MAX_VM_RAM_MIB, MIN_VCPU_COUNT, MIN_VM_RAM_MIB,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,10 +21,12 @@ pub struct MockVmmBackend {
     known_images: HashSet<String>,
     vms: BTreeMap<String, Vm>,
     snapshots: Vec<Snapshot>,
+    captures: Vec<Capture>,
 }
 
 impl MockVmmBackend {
-    /// Create a mock backend pre-populated with realistic HyperOS sample VMs.
+    /// Create a mock backend pre-populated with realistic HyperOS sample VMs,
+    /// a saved snapshot, and a sample packet capture.
     pub fn with_sample_vms() -> Self {
         let mut backend = Self::empty(4096, 4);
 
@@ -39,6 +42,7 @@ impl MockVmmBackend {
                 balloon_target_mib: 512,
                 network_mode: NetworkMode::Isolated,
                 state: VmState::Running,
+                disposable: false,
             },
         );
 
@@ -46,7 +50,7 @@ impl MockVmmBackend {
         backend.vms.insert(
             debian_id.clone(),
             Vm {
-                vm_id: debian_id,
+                vm_id: debian_id.clone(),
                 name: "debian-dev".to_string(),
                 base_image_id: "debian-12-slim-virtio".to_string(),
                 vcpu_count: 2,
@@ -54,8 +58,37 @@ impl MockVmmBackend {
                 balloon_target_mib: 1536,
                 network_mode: NetworkMode::HostOnly,
                 state: VmState::Stopped,
+                disposable: false,
             },
         );
+        backend.snapshots.push(Snapshot {
+            snapshot_id: "5c102e90-8c4a-4b11-9222-104088ab1001".to_string(),
+            vm_id: debian_id,
+            created_at: "2026-11-22T09:30:00Z".to_string(),
+        });
+
+        let web_id = "9e4b2c10-1a2b-4c3d-8e4f-104088ab0003".to_string();
+        backend.vms.insert(
+            web_id.clone(),
+            Vm {
+                vm_id: web_id.clone(),
+                name: "web-research".to_string(),
+                base_image_id: "alpine-3-21-virtio".to_string(),
+                vcpu_count: 2,
+                ram_mib: 1024,
+                balloon_target_mib: 768,
+                network_mode: NetworkMode::Nat,
+                state: VmState::Running,
+                disposable: true,
+            },
+        );
+        backend.captures.push(Capture {
+            capture_id: "0c2f6e9a-7b1d-4c3e-9f80-2d5a6b7c8e91".to_string(),
+            vm_id: web_id,
+            started_at: "2026-11-22T10:00:00Z".to_string(),
+            state: CaptureState::Stopped,
+            bytes: 65_536,
+        });
 
         backend
     }
@@ -73,6 +106,7 @@ impl MockVmmBackend {
             known_images,
             vms: BTreeMap::new(),
             snapshots: Vec::new(),
+            captures: Vec::new(),
         }
     }
 
@@ -82,6 +116,23 @@ impl MockVmmBackend {
 
     pub fn snapshots(&self) -> &[Snapshot] {
         &self.snapshots
+    }
+
+    pub fn captures(&self) -> &[Capture] {
+        &self.captures
+    }
+
+    /// Simulate packet bytes arriving on any `running` capture for `vm_id`, enforcing the 256 MiB cap.
+    pub fn simulate_capture_traffic(&mut self, vm_id: &str, delta_bytes: u64) {
+        for cap in &mut self.captures {
+            if cap.vm_id == vm_id && cap.state == CaptureState::Running {
+                let next = cap.bytes.saturating_add(delta_bytes).min(CAPTURE_MAX_BYTES);
+                cap.bytes = next;
+                if next >= CAPTURE_MAX_BYTES {
+                    cap.state = CaptureState::LimitReached;
+                }
+            }
+        }
     }
 
     /// Admission capacity per `ARCHITECTURE.md`:
@@ -165,12 +216,37 @@ impl MockVmmBackend {
             RpcMethodCall::StopVm(p) => to_json_response(id, self.stop_vm(&p.vm_id)),
             RpcMethodCall::PauseVm(p) => to_json_response(id, self.pause_vm(&p.vm_id)),
             RpcMethodCall::SnapshotVm(p) => to_json_response(id, self.snapshot_vm(&p.vm_id)),
+            RpcMethodCall::ListSnapshots(p) => to_json_response(
+                id,
+                self.list_snapshots(&p.vm_id)
+                    .map(|snapshots| ListSnapshotsResult { snapshots }),
+            ),
+            RpcMethodCall::RestoreSnapshot(p) => {
+                to_json_response(id, self.restore_snapshot(&p.vm_id, &p.snapshot_id))
+            }
+            RpcMethodCall::DeleteSnapshot(p) => to_json_response(
+                id,
+                self.delete_snapshot(&p.vm_id, &p.snapshot_id)
+                    .map(|()| EmptyResult {}),
+            ),
             RpcMethodCall::SetBalloonRam(p) => {
                 to_json_response(id, self.set_balloon_ram(&p.vm_id, p.ram_mib))
             }
             RpcMethodCall::SetNetworkMode(p) => {
                 to_json_response(id, self.set_network_mode(&p.vm_id, p.network_mode))
             }
+            RpcMethodCall::StartCapture(p) => to_json_response(id, self.start_capture(&p.vm_id)),
+            RpcMethodCall::StopCapture(p) => to_json_response(id, self.stop_capture(&p.vm_id)),
+            RpcMethodCall::ListCaptures(p) => to_json_response(
+                id,
+                self.list_captures(&p.vm_id)
+                    .map(|captures| ListCapturesResult { captures }),
+            ),
+            RpcMethodCall::DeleteCapture(p) => to_json_response(
+                id,
+                self.delete_capture(&p.vm_id, &p.capture_id)
+                    .map(|()| EmptyResult {}),
+            ),
         };
 
         encode_frame(&response).expect("mock response frame fits")
@@ -311,6 +387,7 @@ impl VmmBackend for MockVmmBackend {
             balloon_target_mib: params.ram_mib,
             network_mode: params.network_mode,
             state: VmState::Stopped,
+            disposable: params.disposable,
         };
         self.vms.insert(vm_id, vm.clone());
         Ok(vm)
@@ -365,6 +442,11 @@ impl VmmBackend for MockVmmBackend {
             .get_mut(vm_id)
             .ok_or_else(|| rpc_err(error_code::NOT_FOUND, "VM not found"))?;
         vm.state = VmState::Stopped;
+        for cap in &mut self.captures {
+            if cap.vm_id == vm_id && cap.state == CaptureState::Running {
+                cap.state = CaptureState::Stopped;
+            }
+        }
         Ok(vm.clone())
     }
 
@@ -397,6 +479,12 @@ impl VmmBackend for MockVmmBackend {
             .vms
             .get(vm_id)
             .ok_or_else(|| rpc_err(error_code::NOT_FOUND, "VM not found"))?;
+        if vm.disposable {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "snapshot_vm is disallowed on disposable VMs",
+            ));
+        }
         if vm.state != VmState::Stopped {
             return Err(rpc_err(
                 error_code::INVALID_STATE,
@@ -410,6 +498,80 @@ impl VmmBackend for MockVmmBackend {
         };
         self.snapshots.push(snapshot.clone());
         Ok(snapshot)
+    }
+
+    fn list_snapshots(&mut self, vm_id: &str) -> Result<Vec<Snapshot>, ClientError> {
+        if !is_valid_uuid(vm_id) {
+            return Err(rpc_err(error_code::INVALID_PARAMS, "invalid vm_id UUID"));
+        }
+        if !self.vms.contains_key(vm_id) {
+            return Err(rpc_err(error_code::NOT_FOUND, "VM not found"));
+        }
+        let mut list: Vec<Snapshot> = self
+            .snapshots
+            .iter()
+            .filter(|s| s.vm_id == vm_id)
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.snapshot_id.cmp(&b.snapshot_id))
+        });
+        Ok(list)
+    }
+
+    fn restore_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<Vm, ClientError> {
+        if !is_valid_uuid(vm_id) || !is_valid_uuid(snapshot_id) {
+            return Err(rpc_err(
+                error_code::INVALID_PARAMS,
+                "invalid vm_id or snapshot_id UUID",
+            ));
+        }
+        let vm = self
+            .vms
+            .get(vm_id)
+            .cloned()
+            .ok_or_else(|| rpc_err(error_code::NOT_FOUND, "VM not found"))?;
+        if vm.disposable {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "restore_snapshot is disallowed on disposable VMs",
+            ));
+        }
+        if !self
+            .snapshots
+            .iter()
+            .any(|s| s.vm_id == vm_id && s.snapshot_id == snapshot_id)
+        {
+            return Err(rpc_err(error_code::NOT_FOUND, "snapshot not found"));
+        }
+        if vm.state != VmState::Stopped {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "restore_snapshot requires a stopped VM",
+            ));
+        }
+        Ok(vm)
+    }
+
+    fn delete_snapshot(&mut self, vm_id: &str, snapshot_id: &str) -> Result<(), ClientError> {
+        if !is_valid_uuid(vm_id) || !is_valid_uuid(snapshot_id) {
+            return Err(rpc_err(
+                error_code::INVALID_PARAMS,
+                "invalid vm_id or snapshot_id UUID",
+            ));
+        }
+        if !self.vms.contains_key(vm_id) {
+            return Err(rpc_err(error_code::NOT_FOUND, "VM not found"));
+        }
+        let before = self.snapshots.len();
+        self.snapshots
+            .retain(|s| !(s.vm_id == vm_id && s.snapshot_id == snapshot_id));
+        if self.snapshots.len() == before {
+            return Err(rpc_err(error_code::NOT_FOUND, "snapshot not found"));
+        }
+        Ok(())
     }
 
     fn set_balloon_ram(&mut self, vm_id: &str, ram_mib: u32) -> Result<Vm, ClientError> {
@@ -461,8 +623,137 @@ impl VmmBackend for MockVmmBackend {
         Ok(vm.clone())
     }
 
+    fn start_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError> {
+        if !is_valid_uuid(vm_id) {
+            return Err(rpc_err(error_code::INVALID_PARAMS, "invalid vm_id UUID"));
+        }
+        let vm = self
+            .vms
+            .get(vm_id)
+            .ok_or_else(|| rpc_err(error_code::NOT_FOUND, "VM not found"))?;
+        if vm.state != VmState::Running {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "start_capture requires a running VM",
+            ));
+        }
+        if vm.network_mode == NetworkMode::Isolated {
+            return Err(rpc_err(
+                error_code::UNAVAILABLE_CAPABILITY,
+                "start_capture is unavailable on isolated VMs without a NIC",
+            ));
+        }
+        if self
+            .captures
+            .iter()
+            .any(|c| c.vm_id == vm_id && c.state == CaptureState::Running)
+        {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "a packet capture is already running for this VM",
+            ));
+        }
+        let capture = Capture {
+            capture_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            vm_id: vm.vm_id.clone(),
+            started_at: utc_rfc3339_seconds(),
+            state: CaptureState::Running,
+            bytes: 0,
+        };
+        self.captures.push(capture.clone());
+        Ok(capture)
+    }
+
+    fn stop_capture(&mut self, vm_id: &str) -> Result<Capture, ClientError> {
+        if !is_valid_uuid(vm_id) {
+            return Err(rpc_err(error_code::INVALID_PARAMS, "invalid vm_id UUID"));
+        }
+        if !self.vms.contains_key(vm_id) {
+            return Err(rpc_err(error_code::NOT_FOUND, "VM not found"));
+        }
+        if let Some(active) = self
+            .captures
+            .iter_mut()
+            .find(|c| c.vm_id == vm_id && c.state == CaptureState::Running)
+        {
+            active.state = CaptureState::Stopped;
+            return Ok(active.clone());
+        }
+        // Idempotent when none running: return latest capture sorted by (started_at, capture_id).
+        self.captures
+            .iter()
+            .filter(|c| c.vm_id == vm_id)
+            .max_by(|a, b| {
+                a.started_at
+                    .cmp(&b.started_at)
+                    .then_with(|| a.capture_id.cmp(&b.capture_id))
+            })
+            .cloned()
+            .ok_or_else(|| rpc_err(error_code::NOT_FOUND, "no captures exist for VM"))
+    }
+
+    fn list_captures(&mut self, vm_id: &str) -> Result<Vec<Capture>, ClientError> {
+        if !is_valid_uuid(vm_id) {
+            return Err(rpc_err(error_code::INVALID_PARAMS, "invalid vm_id UUID"));
+        }
+        if !self.vms.contains_key(vm_id) {
+            return Err(rpc_err(error_code::NOT_FOUND, "VM not found"));
+        }
+        let mut list: Vec<Capture> = self
+            .captures
+            .iter()
+            .filter(|c| c.vm_id == vm_id)
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.capture_id.cmp(&b.capture_id))
+        });
+        Ok(list)
+    }
+
+    fn delete_capture(&mut self, vm_id: &str, capture_id: &str) -> Result<(), ClientError> {
+        if !is_valid_uuid(vm_id) || !is_valid_uuid(capture_id) {
+            return Err(rpc_err(
+                error_code::INVALID_PARAMS,
+                "invalid vm_id or capture_id UUID",
+            ));
+        }
+        if !self.vms.contains_key(vm_id) {
+            return Err(rpc_err(error_code::NOT_FOUND, "VM not found"));
+        }
+        let Some(pos) = self
+            .captures
+            .iter()
+            .position(|c| c.vm_id == vm_id && c.capture_id == capture_id)
+        else {
+            return Err(rpc_err(error_code::NOT_FOUND, "capture not found"));
+        };
+        if self.captures[pos].state == CaptureState::Running {
+            return Err(rpc_err(
+                error_code::INVALID_STATE,
+                "cannot delete a running capture; stop it first",
+            ));
+        }
+        self.captures.remove(pos);
+        Ok(())
+    }
+
     fn register_template_image(&mut self, image_id: &str) {
         self.known_images.insert(image_id.to_string());
+    }
+
+    fn tick_mock_captures(&mut self) {
+        for cap in &mut self.captures {
+            if cap.state == CaptureState::Running {
+                let next = cap.bytes.saturating_add(8192).min(CAPTURE_MAX_BYTES);
+                cap.bytes = next;
+                if next >= CAPTURE_MAX_BYTES {
+                    cap.state = CaptureState::LimitReached;
+                }
+            }
+        }
     }
 }
 
@@ -482,6 +773,7 @@ mod tests {
                 vcpu_count: 2,
                 ram_mib: 2048,
                 network_mode: NetworkMode::Isolated,
+                disposable: false,
             })
             .unwrap();
         assert_eq!(vm1.state, VmState::Stopped);
@@ -528,6 +820,7 @@ mod tests {
                 vcpu_count: 1,
                 ram_mib: 1536,
                 network_mode: NetworkMode::Isolated,
+                disposable: false,
             }),
             Err(ClientError::Rpc(RpcError {
                 code: error_code::INSUFFICIENT_RESOURCES,
@@ -538,5 +831,118 @@ mod tests {
         mock.stop_vm(&vm1.vm_id).unwrap();
         let restarted = mock.start_vm(&vm1.vm_id).unwrap();
         assert_eq!(restarted.balloon_target_mib, 2048);
+    }
+
+    #[test]
+    fn mock_enforces_contract_v2_disposable_snapshots_and_packet_capture() {
+        let mut mock = MockVmmBackend::empty(4096, 4);
+
+        // Disposable NAT VM
+        let disp = mock
+            .create_vm(CreateVmParams {
+                name: "temp-web".to_string(),
+                base_image_id: "alpine-3-21-virtio".to_string(),
+                vcpu_count: 1,
+                ram_mib: 512,
+                network_mode: NetworkMode::Nat,
+                disposable: true,
+            })
+            .unwrap();
+        assert!(disp.disposable);
+
+        // Snapshot disallowed on disposable VM (-32002)
+        assert!(matches!(
+            mock.snapshot_vm(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+
+        // Capture requires running VM (-32002), idempotent stop errors -32001 when none
+        assert!(matches!(
+            mock.start_capture(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            mock.stop_capture(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::NOT_FOUND,
+                ..
+            }))
+        ));
+
+        mock.start_vm(&disp.vm_id).unwrap();
+        let cap1 = mock.start_capture(&disp.vm_id).unwrap();
+        assert_eq!(cap1.state, CaptureState::Running);
+        // Second simultaneous capture disallowed (-32002)
+        assert!(matches!(
+            mock.start_capture(&disp.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+
+        // Reaching 256 MiB cap transitions capture to limit_reached; limit_reached captures can be deleted
+        mock.simulate_capture_traffic(&disp.vm_id, CAPTURE_MAX_BYTES);
+        let listed = mock.list_captures(&disp.vm_id).unwrap();
+        assert_eq!(listed[0].state, CaptureState::LimitReached);
+        assert_eq!(listed[0].bytes, CAPTURE_MAX_BYTES);
+        mock.delete_capture(&disp.vm_id, &cap1.capture_id).unwrap();
+
+        // Deleting a running capture must fail (-32002); stopping VM stops it first.
+        let cap2 = mock.start_capture(&disp.vm_id).unwrap();
+        assert_eq!(cap2.state, CaptureState::Running);
+        assert!(matches!(
+            mock.delete_capture(&disp.vm_id, &cap2.capture_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+        mock.stop_vm(&disp.vm_id).unwrap();
+        let cap2_stopped = mock.stop_capture(&disp.vm_id).unwrap();
+        assert_eq!(cap2_stopped.state, CaptureState::Stopped);
+        mock.delete_capture(&disp.vm_id, &cap2.capture_id).unwrap();
+
+        // Persistent VM snapshot list / restore / delete
+        let persist = mock
+            .create_vm(CreateVmParams {
+                name: "vault".to_string(),
+                base_image_id: "linux-demo".to_string(),
+                vcpu_count: 1,
+                ram_mib: 512,
+                network_mode: NetworkMode::Isolated,
+                disposable: false,
+            })
+            .unwrap();
+        let snap = mock.snapshot_vm(&persist.vm_id).unwrap();
+        mock.start_vm(&persist.vm_id).unwrap();
+        // restore requires stopped VM (-32002); delete works in running state
+        assert!(matches!(
+            mock.restore_snapshot(&persist.vm_id, &snap.snapshot_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::INVALID_STATE,
+                ..
+            }))
+        ));
+        // Isolated VM rejects capture (-32004)
+        assert!(matches!(
+            mock.start_capture(&persist.vm_id),
+            Err(ClientError::Rpc(RpcError {
+                code: error_code::UNAVAILABLE_CAPABILITY,
+                ..
+            }))
+        ));
+        mock.stop_vm(&persist.vm_id).unwrap();
+        mock.restore_snapshot(&persist.vm_id, &snap.snapshot_id)
+            .unwrap();
+        mock.delete_snapshot(&persist.vm_id, &snap.snapshot_id)
+            .unwrap();
+        assert!(mock.list_snapshots(&persist.vm_id).unwrap().is_empty());
     }
 }

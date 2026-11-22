@@ -62,6 +62,7 @@ Vulnerabilities that violate HyperOS's documented security invariants in [`ARCHI
 - Local denial-of-service attacks that already require `root` (`UID 0`) privileges on the host.
 - Upstream vulnerabilities in third-party guest OS packages (Alpine, Debian, etc.) unrelated to HyperOS configuration or `guest-images/` build scripts.
 - Theoretical attacks without a demonstrated security boundary violation.
+- Known, documented gaps tracked in [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md): `crosvm` running as root and the absence of verified boot. Reports that bypass these *further* are still in scope.
 
 ---
 

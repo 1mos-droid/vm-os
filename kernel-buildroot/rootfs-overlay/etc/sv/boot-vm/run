@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+while [ ! -S /run/hyperos/vmm.sock ]; do sleep 1; done
+image=$(cat /run/hyperos/boot-image)
+# A supervisor restart must not create another VM.
+if [ ! -f /run/hyperos/boot-vm-attempted ]; then
+    touch /run/hyperos/boot-vm-attempted
+    echo "HYPEROS_KSM=$(cat /sys/kernel/mm/ksm/run)" >/dev/console
+    awk '/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {print "HYPEROS_IDLE_RAM_KIB=" t-a}' /proc/meminfo >/dev/console
+    socat -T 180 VSOCK-LISTEN:5002 - >/dev/console &
+    if /usr/bin/hyperos-vm "$image"; then
+        echo "HYPEROS_VM_RUNNING $image" >/dev/console
+    else
+        echo "HYPEROS_VM_FAILED $image" >/dev/console
+    fi
+fi
+exec sleep 2147483647
