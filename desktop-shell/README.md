@@ -83,3 +83,11 @@ cargo build \
 | `XDG_RUNTIME_DIR` | Writable directory (`0700`, e.g. `/run/user/1000`) | Required for Wayland listener socket (`wayland-hyperos-*`) |
 | `HYPEROS_DRM_OUTPUT` | Optional env var (e.g. `eDP-1`, `Virtual-1`) | Override automatic first-connected DRM output selection |
 | `XDG_SEAT` | Optional env var (default `seat0`) | Seat name passed to `libseat` and `libinput` |
+
+### Running as a Non-Root User (`hyperos` group)
+
+Per [`ARCHITECTURE.md`](../ARCHITECTURE.md) Contract v2 (A3):
+- `vmm-daemon` runs as `root` with `/run/hyperos` set to `root:hyperos 0750` and `/run/hyperos/vmm.sock` set to `root:hyperos 0660`, verifying `SO_PEERCRED` against UID `0` or primary/supplementary membership in the `hyperos` group and closing unauthorized sockets immediately without a response.
+- Both `desktop-shell` and `vm-control-ui` run as an unprivileged GUI user in the `hyperos` group (plus `seat` for `seatd`).
+- `/var/lib/hyperos` is `root:hyperos 0710` (traverse-only) and `/var/lib/hyperos/captures/` is `root:hyperos 0750`, while `base-images/` and `instances/` remain `root:root 0700`.
+- When connection fails or is rejected, the Top Context Rail displays a visible red `VMM Offline` badge and an actionable banner distinguishing filesystem permission denial (`hyperos` group missing), immediate `SO_PEERCRED` peer close, `vmm-daemon` not running, and RPC timeouts (without blindly retrying mutations).

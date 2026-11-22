@@ -146,4 +146,24 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn handles_missing_or_restricted_base_images_dir_gracefully() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let missing =
+            std::env::temp_dir().join(format!("hyperos-missing-images-{}", uuid::Uuid::new_v4()));
+        let fallback = discover_templates(&missing, false);
+        assert!(!fallback.is_empty());
+
+        let locked =
+            std::env::temp_dir().join(format!("hyperos-locked-images-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let restricted = discover_templates(&locked, false);
+        assert!(!restricted.is_empty());
+
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o700));
+        let _ = fs::remove_dir_all(&locked);
+    }
 }

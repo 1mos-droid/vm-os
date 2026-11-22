@@ -72,3 +72,11 @@ cargo build \
 | `/run/hyperos/vmm.sock` | `root:hyperos 0660` (dir `0750`) | `vmm-daemon` JSON-RPC 2.0 control socket (user in `hyperos` group) |
 | `/proc/meminfo` & `/sys/block/zram0/*` | World-readable procfs/sysfs | Live host memory & ZRAM gauges |
 | `/var/lib/hyperos/base-images/` | Optional read; `PermissionDenied` handled gracefully | Falls back cleanly when base images dir is `root:root 0700` |
+
+### Running as a Non-Root User (`hyperos` group)
+
+Per [`ARCHITECTURE.md`](../ARCHITECTURE.md) Contract v2 (A3):
+- `vmm-daemon` creates `/run/hyperos` as `root:hyperos 0750` and `/run/hyperos/vmm.sock` as `root:hyperos 0660`, verifying `SO_PEERCRED` against UID `0` or primary/supplementary membership in the `hyperos` group and closing unauthorized peers without sending a frame.
+- `vm-control-ui` runs as an unprivileged GUI user belonging to `hyperos` (`id -nG` shows `hyperos`).
+- `/var/lib/hyperos` is `root:hyperos 0710` and `captures/` is `root:hyperos 0750`, while `base-images/` and `instances/` remain `root:root 0700`; `discover_templates()` falls back cleanly when `base-images/` returns `PermissionDenied`.
+- Connection errors in the status bar distinguish missing `hyperos` group permissions, immediate `SO_PEERCRED` close, `vmm-daemon` not running (`sv status /run/service/vmm-daemon`), and timeouts without blindly retrying mutating RPCs.

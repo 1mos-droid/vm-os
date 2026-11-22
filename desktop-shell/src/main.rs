@@ -91,6 +91,8 @@ struct ShellRuntime {
     bridge: Box<dyn ShellVmmBridge>,
     mock_mode: bool,
     vms: Vec<VmSummary>,
+    vmm_connected: bool,
+    vmm_error: Option<String>,
     sys: SystemStatus,
 }
 
@@ -113,9 +115,19 @@ fn hex_to_slint(hex: &str) -> Color {
 }
 
 fn sync_shell_ui(ui: &HyperShellWindow, rt: &mut ShellRuntime) {
-    if let Ok(vms) = rt.bridge.list_vms() {
-        rt.vms = vms;
+    match rt.bridge.list_vms() {
+        Ok(vms) => {
+            rt.vms = vms;
+            rt.vmm_connected = true;
+            rt.vmm_error = None;
+        }
+        Err(err) => {
+            rt.vmm_connected = false;
+            rt.vmm_error = Some(err);
+        }
     }
+    ui.set_vmm_connected(rt.vmm_connected);
+    ui.set_vmm_error(SharedString::from(rt.vmm_error.as_deref().unwrap_or("")));
     rt.sys = SystemStatus::read(rt.mock_mode, Some(&rt.sys));
 
     // Sync Top Context Rail VM Space pills
@@ -555,9 +567,10 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
     let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
 
     let mut bridge = build_bridge(&cli);
-    let vms = bridge.list_vms().unwrap_or_default();
     if cli.mock {
-        seed_mock_workspace_windows(&mut compositor, &vms);
+        if let Ok(vms) = bridge.list_vms() {
+            seed_mock_workspace_windows(&mut compositor, &vms);
+        }
     }
 
     let ui = HyperShellWindow::new()?;
@@ -565,7 +578,9 @@ fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         compositor,
         bridge,
         mock_mode: cli.mock,
-        vms,
+        vms: Vec::new(),
+        vmm_connected: true,
+        vmm_error: None,
         sys: SystemStatus::read(cli.mock, None),
     }));
     wire_shell(&ui, Rc::clone(&rt));
@@ -623,9 +638,10 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
     let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
 
     let mut bridge = build_bridge(&cli);
-    let vms = bridge.list_vms().unwrap_or_default();
     if cli.mock {
-        seed_mock_workspace_windows(&mut compositor, &vms);
+        if let Ok(vms) = bridge.list_vms() {
+            seed_mock_workspace_windows(&mut compositor, &vms);
+        }
     }
 
     let ui = HyperShellWindow::new()?;
@@ -633,7 +649,9 @@ fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
         compositor,
         bridge,
         mock_mode: cli.mock,
-        vms,
+        vms: Vec::new(),
+        vmm_connected: true,
+        vmm_error: None,
         sys: SystemStatus::read(cli.mock, None),
     }));
 
@@ -683,9 +701,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (mut display, mut compositor) = HyperShellState::new(1280, 760)?;
         let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
         let mut bridge = build_bridge(&cli);
-        let vms = bridge.list_vms().unwrap_or_default();
-        if cli.mock {
-            seed_mock_workspace_windows(&mut compositor, &vms);
+        match bridge.list_vms() {
+            Ok(vms) if cli.mock => seed_mock_workspace_windows(&mut compositor, &vms),
+            Ok(_) => {}
+            Err(err) => eprintln!("desktop-shell: {err}"),
         }
         println!(
             "desktop-shell: running Smithay Wayland compositor headlessly (mock={})",
@@ -752,10 +771,14 @@ mod tests {
             bridge,
             mock_mode: true,
             vms,
+            vmm_connected: true,
+            vmm_error: None,
             sys: SystemStatus::read(true, None),
         }));
         wire_shell(&ui, Rc::clone(&rt));
 
+        assert!(ui.get_vmm_connected());
+        assert_eq!(ui.get_vmm_error(), "");
         assert_eq!(ui.get_space_pills().row_count(), 3);
         assert_eq!(ui.get_windows().row_count(), 3);
         assert!(!ui.get_action_deck_visible());
@@ -783,5 +806,51 @@ mod tests {
         assert!(!ui.get_action_deck_visible());
         assert_eq!(ui.get_space_pills().row_count(), 4);
         assert_eq!(ui.get_windows().row_count(), 4);
+
+        // Verify non-root / SO_PEERCRED / missing-daemon socket error propagates cleanly to shell banner
+        struct FailingBridge;
+        impl ShellVmmBridge for FailingBridge {
+            fn list_vms(&mut self) -> Result<Vec<VmSummary>, String> {
+                Err(desktop_shell::vmm_bridge::classify_peer_closed_error(
+                    std::path::Path::new(DEFAULT_VMM_SOCKET),
+                    false,
+                ))
+            }
+            fn create_vm(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: u32,
+                _: u32,
+                _: &str,
+            ) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
+            fn start_vm(&mut self, _: &str) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
+            fn set_balloon_ram(&mut self, _: &str, _: u32) -> Result<VmSummary, String> {
+                Err("disconnected".into())
+            }
+        }
+
+        let (_d2, c2) = HyperShellState::new(1280, 760).unwrap();
+        let err_ui = HyperShellWindow::new().unwrap();
+        let err_rt = Rc::new(RefCell::new(ShellRuntime {
+            compositor: c2,
+            bridge: Box::new(FailingBridge),
+            mock_mode: false,
+            vms: Vec::new(),
+            vmm_connected: true,
+            vmm_error: None,
+            sys: SystemStatus::read(true, None),
+        }));
+        wire_shell(&err_ui, err_rt);
+        assert!(!err_ui.get_vmm_connected());
+        assert!(err_ui.get_vmm_error().contains("SO_PEERCRED"));
+        assert!(err_ui.get_vmm_error().contains("hyperos"));
+        window.draw_if_needed(|r| {
+            r.render(&mut fb, 1280);
+        });
     }
 }

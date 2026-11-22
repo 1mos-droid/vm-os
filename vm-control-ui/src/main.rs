@@ -301,7 +301,7 @@ fn sync_vms_ui(ui: &MainWindow, state: &mut AppState) {
         }
         Err(err) => {
             ui.set_backend_connected(false);
-            set_status(ui, format!("Failed to query list_vms: {err}"), true);
+            set_status(ui, err.to_string(), true);
         }
     }
     sync_checkpoints_ui(ui, state);

@@ -8,7 +8,7 @@ use crate::rpc::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,9 +26,63 @@ pub enum ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport(msg) => write!(f, "transport error: {msg}"),
+            Self::Transport(msg) => f.write_str(msg),
             Self::Rpc(err) => write!(f, "{err}"),
         }
+    }
+}
+
+/// Produce a clear, actionable message when `UnixStream::connect` fails.
+pub fn classify_connect_error(socket_path: &Path, err: &io::Error) -> String {
+    let path = socket_path.display();
+    match err.kind() {
+        io::ErrorKind::PermissionDenied => format!(
+            "Permission denied connecting to {path}. Ensure your user is a member of the `hyperos` group (`id -nG`; socket mode is root:hyperos 0660 under /run/hyperos 0750), or pass --mock for preview mode."
+        ),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => format!(
+            "Cannot connect to vmm-daemon at {path} ({err}). vmm-daemon may not be running — check `sv status /run/service/vmm-daemon` or run with --mock."
+        ),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => format!(
+            "Timed out connecting to vmm-daemon at {path}. Check `sv status /run/service/vmm-daemon`."
+        ),
+        _ => format!("Failed to connect to {path}: {err}"),
+    }
+}
+
+/// Produce a clear message when the peer closes the socket connection without a complete frame.
+pub fn classify_peer_closed_error(socket_path: &Path, received_any_response: bool) -> String {
+    let path = socket_path.display();
+    if received_any_response {
+        format!(
+            "vmm-daemon closed {path} unexpectedly (daemon may have restarted or rejected an oversized frame)."
+        )
+    } else {
+        format!(
+            "vmm-daemon closed {path} immediately without responding — access denied by SO_PEERCRED (your user must be UID 0 or a member of the `hyperos` group), or the daemon exited during handshake."
+        )
+    }
+}
+
+/// Classify mid-stream I/O failures (timeouts, SO_PEERCRED resets, permission errors).
+pub fn classify_io_error(
+    socket_path: &Path,
+    operation: &str,
+    err: &io::Error,
+    received_any_response: bool,
+) -> String {
+    let path = socket_path.display();
+    match err.kind() {
+        io::ErrorKind::PermissionDenied => classify_connect_error(socket_path, err),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => format!(
+            "Timed out waiting for vmm-daemon on {path} during {operation}. Do not blindly retry mutations; click Refresh (list_vms) to verify current VM state."
+        ),
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::UnexpectedEof => {
+            classify_peer_closed_error(socket_path, received_any_response)
+        }
+        _ => format!("{operation} on {path} failed: {err}"),
     }
 }
 
@@ -81,6 +135,9 @@ pub struct UnixSocketClient {
 struct ConnectionState {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
+    /// True once at least one valid JSON-RPC frame was received on this connection.
+    /// Helps distinguish initial SO_PEERCRED rejection from later daemon restarts.
+    has_received_response: bool,
     /// Buffered out-of-order response frames keyed by response `id`.
     pending_responses: HashMap<String, Vec<u8>>,
 }
@@ -116,10 +173,7 @@ impl UnixSocketClient {
     fn ensure_connected(&mut self) -> Result<&mut ConnectionState, ClientError> {
         if self.connection.is_none() {
             let stream = UnixStream::connect(&self.socket_path).map_err(|e| {
-                ClientError::Transport(format!(
-                    "failed to connect to {}: {e}",
-                    self.socket_path.display()
-                ))
+                ClientError::Transport(classify_connect_error(&self.socket_path, &e))
             })?;
             stream
                 .set_read_timeout(Some(self.timeout))
@@ -133,6 +187,7 @@ impl UnixSocketClient {
             self.connection = Some(ConnectionState {
                 reader: BufReader::new(stream),
                 writer,
+                has_received_response: false,
                 pending_responses: HashMap::new(),
             });
         }
@@ -158,11 +213,16 @@ impl UnixSocketClient {
         let request =
             RpcRequest::new(req_id.clone(), method_name, params).map_err(ClientError::Transport)?;
         let frame = encode_frame(&request).map_err(ClientError::Transport)?;
+        let had_healthy_conn = self
+            .connection
+            .as_ref()
+            .is_some_and(|conn| conn.has_received_response);
 
         match self.send_and_receive::<R>(&req_id, &frame) {
             Ok(res) => Ok(res),
-            Err(ClientError::Transport(first_err)) if allow_reconnect_retry => {
-                // Only safe for idempotent read-only queries such as `list_vms`.
+            Err(ClientError::Transport(first_err)) if allow_reconnect_retry && had_healthy_conn => {
+                // Only retry read-only queries after an established connection drops.
+                // Never mask permission/daemon-offline/SO_PEERCRED handshake errors.
                 self.drop_connection();
                 self.send_and_receive::<R>(&req_id, &frame)
                     .map_err(|_| ClientError::Transport(first_err))
@@ -175,23 +235,35 @@ impl UnixSocketClient {
     where
         R: for<'de> Deserialize<'de>,
     {
+        let socket_path = self.socket_path.clone();
         let result = (|| {
             let conn = self.ensure_connected()?;
+            let received_any = conn.has_received_response;
             conn.writer
                 .write_all(frame)
                 .and_then(|_| conn.writer.flush())
-                .map_err(|e| ClientError::Transport(format!("socket write failed: {e}")))?;
+                .map_err(|e| {
+                    ClientError::Transport(classify_io_error(
+                        &socket_path,
+                        "socket write",
+                        &e,
+                        received_any,
+                    ))
+                })?;
 
             if let Some(buffered) = conn.pending_responses.remove(expected_id) {
                 let decoded =
                     decode_response_frame::<R>(&buffered).map_err(ClientError::Transport)?;
+                conn.has_received_response = true;
                 return decoded.into_result().map_err(ClientError::Rpc);
             }
 
             loop {
-                let raw_frame = read_bounded_frame(&mut conn.reader)?;
+                let received_any = conn.has_received_response;
+                let raw_frame = read_bounded_frame(&mut conn.reader, &socket_path, received_any)?;
                 let envelope: RpcResponse<serde_json::Value> =
                     decode_response_frame(&raw_frame).map_err(ClientError::Transport)?;
+                conn.has_received_response = true;
 
                 match envelope.id() {
                     Some(id) if id == expected_id => {
@@ -227,16 +299,26 @@ impl UnixSocketClient {
 
 /// Read a single LF-terminated frame up to `MAX_FRAME_BYTES` (65536 bytes including LF).
 /// Never allocates beyond `MAX_FRAME_BYTES` on malicious or malformed streams.
-fn read_bounded_frame<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ClientError> {
+fn read_bounded_frame<R: BufRead>(
+    reader: &mut R,
+    socket_path: &Path,
+    received_any_response: bool,
+) -> Result<Vec<u8>, ClientError> {
     let mut buf = Vec::with_capacity(512);
     loop {
-        let available = reader
-            .fill_buf()
-            .map_err(|e| ClientError::Transport(format!("socket read failed: {e}")))?;
+        let available = reader.fill_buf().map_err(|e| {
+            ClientError::Transport(classify_io_error(
+                socket_path,
+                "socket read",
+                &e,
+                received_any_response,
+            ))
+        })?;
         if available.is_empty() {
-            return Err(ClientError::Transport(
-                "daemon closed Unix socket connection".to_string(),
-            ));
+            return Err(ClientError::Transport(classify_peer_closed_error(
+                socket_path,
+                received_any_response,
+            )));
         }
 
         if let Some(nl_pos) = available.iter().position(|&b| b == b'\n') {
@@ -360,8 +442,124 @@ mod tests {
     use super::*;
     use crate::mock::MockVmmBackend;
     use crate::rpc::VmState;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::thread;
+
+    #[test]
+    fn classifies_socket_permission_missing_timeout_and_so_peercred_errors() {
+        let sock = Path::new("/run/hyperos/vmm.sock");
+
+        let perm = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+        assert!(perm.contains("hyperos"));
+        assert!(perm.contains("0660"));
+
+        let missing = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::NotFound, "no such file"),
+        );
+        assert!(missing.contains("vmm-daemon"));
+
+        let refused = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused"),
+        );
+        assert!(refused.contains("vmm-daemon"));
+
+        let rejected = classify_peer_closed_error(sock, false);
+        assert!(rejected.contains("SO_PEERCRED"));
+        assert!(rejected.contains("hyperos"));
+
+        let restarted = classify_peer_closed_error(sock, true);
+        assert!(restarted.contains("restarted"));
+
+        let timed_out = classify_io_error(
+            sock,
+            "socket read",
+            &io::Error::new(io::ErrorKind::TimedOut, "timed out"),
+            true,
+        );
+        assert!(timed_out.contains("Timed out"));
+        assert!(timed_out.contains("Refresh"));
+    }
+
+    #[test]
+    fn immediate_peer_close_reports_so_peercred_without_blind_retry() {
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-peercred-{}.sock", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let accept_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accept_count_srv = std::sync::Arc::clone(&accept_count);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            accept_count_srv.fetch_add(1, Ordering::SeqCst);
+            // Simulate daemon rejecting peer via SO_PEERCRED: close immediately with no response.
+            drop(stream);
+        });
+
+        let mut client = UnixSocketClient::new(&sock_path);
+        let err = client.list_vms().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("SO_PEERCRED"), "unexpected error: {msg}");
+        assert!(msg.contains("hyperos"), "unexpected error: {msg}");
+        assert_eq!(accept_count.load(Ordering::SeqCst), 1);
+
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn nonroot_0660_socket_connects_and_retries_only_after_healthy_session_drops() {
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-0660-{}.sock", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        let server = thread::spawn(move || {
+            // Connection 1: serve one list_vms call, then drop connection when client next reads.
+            let (stream1, _) = listener.accept().unwrap();
+            let mut writer1 = stream1.try_clone().unwrap();
+            let mut reader1 = BufReader::new(stream1);
+            let mut line = String::new();
+            reader1.read_line(&mut line).unwrap();
+            let req1: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let id1 = req1["id"].as_str().unwrap();
+            let resp1 =
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id1}\",\"result\":{{\"vms\":[]}}}}\n");
+            writer1.write_all(resp1.as_bytes()).unwrap();
+            writer1.flush().unwrap();
+            drop(writer1);
+            drop(reader1);
+
+            // Connection 2: accept reconnect retry for the second read-only list_vms.
+            let (stream2, _) = listener.accept().unwrap();
+            let mut writer2 = stream2.try_clone().unwrap();
+            let mut reader2 = BufReader::new(stream2);
+            let mut line2 = String::new();
+            reader2.read_line(&mut line2).unwrap();
+            let req2: serde_json::Value = serde_json::from_str(&line2).unwrap();
+            let id2 = req2["id"].as_str().unwrap();
+            let resp2 =
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id2}\",\"result\":{{\"vms\":[]}}}}\n");
+            writer2.write_all(resp2.as_bytes()).unwrap();
+            writer2.flush().unwrap();
+        });
+
+        let mut client = UnixSocketClient::new(&sock_path);
+        assert!(client.list_vms().unwrap().is_empty());
+        // Second call hits EOF on closed stream1 and transparently reconnects because stream1 was healthy.
+        assert!(client.list_vms().unwrap().is_empty());
+
+        drop(client);
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
 
     #[test]
     fn unix_socket_client_speaks_all_eight_methods_over_af_unix() {

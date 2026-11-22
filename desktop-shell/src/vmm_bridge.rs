@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +11,90 @@ use std::time::Duration;
 
 pub const DEFAULT_VMM_SOCKET: &str = "/run/hyperos/vmm.sock";
 pub const MAX_FRAME_BYTES: usize = 65_536;
+
+/// Produce a clear, actionable message when `UnixStream::connect` fails.
+pub fn classify_connect_error(socket_path: &Path, err: &io::Error) -> String {
+    let path = socket_path.display();
+    match err.kind() {
+        io::ErrorKind::PermissionDenied => format!(
+            "Permission denied connecting to {path}. Ensure your user belongs to the `hyperos` group (socket is root:hyperos 0660 under /run/hyperos 0750), or run with --mock."
+        ),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => format!(
+            "Cannot reach vmm-daemon at {path} ({err}). Check `sv status /run/service/vmm-daemon` or run with --mock."
+        ),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => format!(
+            "Timed out connecting to vmm-daemon at {path}. Check `sv status /run/service/vmm-daemon`."
+        ),
+        _ => format!("Cannot reach {path}: {err}"),
+    }
+}
+
+/// Produce a clear message when `vmm-daemon` closes the socket without sending a complete frame.
+pub fn classify_peer_closed_error(socket_path: &Path, received_any_response: bool) -> String {
+    let path = socket_path.display();
+    if received_any_response {
+        format!("vmm-daemon closed {path} unexpectedly (daemon restarted or frame limit exceeded).")
+    } else {
+        format!(
+            "vmm-daemon closed {path} immediately without responding — access denied by SO_PEERCRED (your user must be UID 0 or a member of the `hyperos` group), or the daemon stopped during handshake."
+        )
+    }
+}
+
+/// Classify mid-stream I/O failures (timeouts, SO_PEERCRED resets, permission errors).
+pub fn classify_io_error(
+    socket_path: &Path,
+    operation: &str,
+    err: &io::Error,
+    received_any_response: bool,
+) -> String {
+    let path = socket_path.display();
+    match err.kind() {
+        io::ErrorKind::PermissionDenied => classify_connect_error(socket_path, err),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => format!(
+            "Timed out waiting for vmm-daemon on {path} during {operation}. Do not blindly retry mutations; refresh state via list_vms."
+        ),
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::UnexpectedEof => {
+            classify_peer_closed_error(socket_path, received_any_response)
+        }
+        _ => format!("{operation} on {path} failed: {err}"),
+    }
+}
+
+/// Read a single LF-terminated frame up to `MAX_FRAME_BYTES` without unbounded allocation.
+fn read_bounded_frame<R: BufRead>(reader: &mut R, socket_path: &Path) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::with_capacity(512);
+    loop {
+        let available = reader
+            .fill_buf()
+            .map_err(|e| classify_io_error(socket_path, "socket read", &e, false))?;
+        if available.is_empty() {
+            return Err(classify_peer_closed_error(socket_path, false));
+        }
+        if let Some(nl_pos) = available.iter().position(|&b| b == b'\n') {
+            let take = nl_pos + 1;
+            if buf.len() + take > MAX_FRAME_BYTES {
+                return Err(format!(
+                    "response frame exceeds maximum {MAX_FRAME_BYTES} bytes"
+                ));
+            }
+            buf.extend_from_slice(&available[..take]);
+            reader.consume(take);
+            return Ok(buf);
+        }
+        let len = available.len();
+        if buf.len() + len >= MAX_FRAME_BYTES {
+            return Err(format!(
+                "response frame exceeds maximum {MAX_FRAME_BYTES} bytes without LF"
+            ));
+        }
+        buf.extend_from_slice(available);
+        reader.consume(len);
+    }
+}
 
 /// Exact `ARCHITECTURE.md` VM wire schema (8 required fields, no unknown keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,7 +327,7 @@ impl UnixVmmBridge {
         }
 
         let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| format!("cannot reach {}: {e}", self.socket_path.display()))?;
+            .map_err(|e| classify_connect_error(&self.socket_path, &e))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|e| e.to_string())?;
@@ -251,28 +335,34 @@ impl UnixVmmBridge {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .map_err(|e| e.to_string())?;
 
-        stream.write_all(&frame).map_err(|e| e.to_string())?;
-        stream.flush().map_err(|e| e.to_string())?;
+        stream
+            .write_all(&frame)
+            .and_then(|_| stream.flush())
+            .map_err(|e| classify_io_error(&self.socket_path, "socket write", &e, false))?;
 
         let mut reader = BufReader::new(stream);
-        let mut resp_line = String::new();
-        let n = reader
-            .read_line(&mut resp_line)
-            .map_err(|e| e.to_string())?;
-        if n == 0 || n > MAX_FRAME_BYTES {
-            return Err("invalid or oversized response frame".to_string());
-        }
+        let resp_bytes = read_bounded_frame(&mut reader, &self.socket_path)?;
+        let resp_line = std::str::from_utf8(resp_bytes.strip_suffix(b"\n").unwrap_or(&resp_bytes))
+            .map_err(|e| format!("response frame is not valid UTF-8: {e}"))?;
 
         let env: RawResponse<T> =
-            serde_json::from_str(&resp_line).map_err(|e| format!("decode error: {e}"))?;
+            serde_json::from_str(resp_line).map_err(|e| format!("decode error: {e}"))?;
         if env.jsonrpc != "2.0" {
             return Err("invalid jsonrpc version".to_string());
         }
-        if let Some(err) = env.error {
-            return Err(format!("RPC {}: {}", err.code, err.message));
+        match (env.result, env.error) {
+            (Some(_), Some(_)) => {
+                Err("protocol violation: response has both result and error".to_string())
+            }
+            (None, None) => Err("missing result or error in JSON-RPC response".to_string()),
+            (None, Some(err)) => Err(format!("RPC {}: {}", err.code, err.message)),
+            (Some(result), None) => {
+                if env.id.as_deref() != Some(id.as_str()) {
+                    return Err("mismatched JSON-RPC response id".to_string());
+                }
+                Ok(result)
+            }
         }
-        env.result
-            .ok_or_else(|| "missing result in JSON-RPC response".to_string())
     }
 }
 
@@ -418,6 +508,84 @@ impl ShellVmmBridge for MockShellVmmBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    #[test]
+    fn classifies_socket_permission_missing_timeout_and_so_peercred_errors() {
+        let sock = Path::new("/run/hyperos/vmm.sock");
+
+        let perm = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+        assert!(perm.contains("hyperos"));
+        assert!(perm.contains("0660"));
+
+        let missing = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::NotFound, "no such file"),
+        );
+        assert!(missing.contains("vmm-daemon"));
+
+        let refused = classify_connect_error(
+            sock,
+            &io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused"),
+        );
+        assert!(refused.contains("vmm-daemon"));
+
+        let peercred = classify_peer_closed_error(sock, false);
+        assert!(peercred.contains("SO_PEERCRED"));
+        assert!(peercred.contains("hyperos"));
+
+        let timed_out = classify_io_error(
+            sock,
+            "socket read",
+            &io::Error::new(io::ErrorKind::TimedOut, "timed out"),
+            false,
+        );
+        assert!(timed_out.contains("Timed out"));
+    }
+
+    #[test]
+    fn unix_vmm_bridge_reports_so_peercred_and_accepts_0660_socket() {
+        let sock_path =
+            std::env::temp_dir().join(format!("hyperos-shell-sock-{}.sock", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        let server = thread::spawn(move || {
+            // Connection 1: simulate SO_PEERCRED immediate close without response.
+            let (s1, _) = listener.accept().unwrap();
+            drop(s1);
+
+            // Connection 2: respond to list_vms cleanly.
+            let (s2, _) = listener.accept().unwrap();
+            let mut w = s2.try_clone().unwrap();
+            let mut r = BufReader::new(s2);
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let id = req["id"].as_str().unwrap();
+            let resp =
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":{{\"vms\":[]}}}}\n");
+            w.write_all(resp.as_bytes()).unwrap();
+            w.flush().unwrap();
+        });
+
+        let mut bridge = UnixVmmBridge::new(&sock_path);
+        let err = bridge.list_vms().unwrap_err();
+        assert!(err.contains("SO_PEERCRED"), "unexpected error: {err}");
+        assert!(err.contains("hyperos"), "unexpected error: {err}");
+
+        let vms = bridge.list_vms().unwrap();
+        assert!(vms.is_empty());
+
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock_path);
+    }
 
     #[test]
     fn reclaim_idle_ram_deflates_idle_balloons_and_reports_savings() {
