@@ -255,4 +255,4 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 - [x] Docs match the code (this commit)
 - [x] A0 (approved 2026-11-22) · [x] A1 · [ ] A2 · [x] A3 · [x] A4 · [x] A5
 - [ ] B1 · [ ] B2 · [ ] B3 · [ ] B4 · [ ] B5 · [ ] B6
-- [ ] C1 · [ ] C2 · [ ] C3 · [ ] C4 · [ ] C5
+- [x] C1 · [ ] C2 · [ ] C3 · [ ] C4 · [ ] C5

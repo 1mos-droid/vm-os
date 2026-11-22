@@ -5,12 +5,18 @@ edition = "2021"
 description = "Lightweight native desktop GUI client for the HyperOS vmm-daemon JSON-RPC 2.0 API"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["winit"]
+# Desktop development & testing (Wayland + X11 via winit + software renderer).
+winit = ["slint/backend-winit"]
+# Minimal Wayland-only target for HyperOS Buildroot musl images (drops X11 deps).
+wayland = ["slint/backend-winit-wayland"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 slint = { version = "1.19", default-features = false, features = [
     "std",
-    "backend-winit",
     "renderer-software",
     "compat-1-2",
 ] }

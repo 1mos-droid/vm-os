@@ -11,17 +11,22 @@ use desktop_shell::vmm_bridge::{
     launch_environment_preset, reclaim_idle_ram, EnvironmentPreset, MockShellVmmBridge,
     ShellVmmBridge, UnixVmmBridge, VmSummary, DEFAULT_VMM_SOCKET,
 };
-use slint::{Color, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{Color, ModelRc, SharedString, VecModel};
+#[cfg(feature = "winit")]
+use slint::{Timer, TimerMode};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+#[cfg(feature = "winit")]
+use std::time::Duration;
+use std::time::Instant;
 
 slint::include_modules!();
 
 struct ShellCli {
     mock: bool,
     headless: bool,
+    kms: bool,
     vmm_socket: PathBuf,
     wayland_socket: Option<String>,
 }
@@ -29,6 +34,7 @@ struct ShellCli {
 fn parse_cli() -> Result<Option<ShellCli>, String> {
     let mut mock = false;
     let mut headless = false;
+    let mut kms = false;
     let mut vmm_socket = PathBuf::from(DEFAULT_VMM_SOCKET);
     let mut wayland_socket = None;
 
@@ -37,6 +43,7 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
         match arg.as_str() {
             "--mock" => mock = true,
             "--headless" => headless = true,
+            "--kms" => kms = true,
             "--socket" => {
                 let p = args
                     .next()
@@ -58,7 +65,8 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
                      \n\
                      OPTIONS:\n\
                        --mock                    Run with in-memory mock VMs and telemetry fallback\n\
-                       --headless                Run Smithay Wayland compositor without opening a nested window\n\
+                       --headless                Run Smithay Wayland compositor without opening a display\n\
+                       --kms                     Force bare-metal DRM/KMS + libinput backend\n\
                        --socket <PATH>           vmm-daemon Unix socket (default: {DEFAULT_VMM_SOCKET})\n\
                        --wayland-socket <NAME>   Wayland listening socket name (default: auto wayland-hyperos-*)\n\
                        -h, --help                Print this help message"
@@ -72,6 +80,7 @@ fn parse_cli() -> Result<Option<ShellCli>, String> {
     Ok(Some(ShellCli {
         mock,
         headless,
+        kms,
         vmm_socket,
         wayland_socket,
     }))
@@ -182,6 +191,7 @@ fn sync_shell_ui(ui: &HyperShellWindow, rt: &mut ShellRuntime) {
 }
 
 fn seed_mock_workspace_windows(compositor: &mut HyperShellState, vms: &[VmSummary]) {
+    let (out_w, out_h) = compositor.output_size;
     if let Some(work) = vms.first() {
         let origin = WindowOrigin::Vm {
             vm_id: work.vm_id.clone(),
@@ -189,7 +199,7 @@ fn seed_mock_workspace_windows(compositor: &mut HyperShellState, vms: &[VmSummar
             network_mode: work.network_mode.clone(),
             ephemeral: false,
         };
-        let rect = SnapZone::LeftHalf.target_rect(1280, 760);
+        let rect = SnapZone::LeftHalf.target_rect(out_w, out_h);
         let id = compositor.register_managed_window(
             "Documents & Notes",
             "work-docs",
@@ -208,7 +218,7 @@ fn seed_mock_workspace_windows(compositor: &mut HyperShellState, vms: &[VmSummar
             network_mode: browser.network_mode.clone(),
             ephemeral: true,
         };
-        let rect = SnapZone::RightHalf.target_rect(1280, 760);
+        let rect = SnapZone::RightHalf.target_rect(out_w, out_h);
         let id = compositor.register_managed_window(
             "Private Web Session",
             "web-browser",
@@ -425,7 +435,7 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
                 st.compositor.snap_window(wid as u64, zone, Instant::now());
                 // Also step immediately so even single-frame renders reflect movement
                 st.compositor
-                    .tick_transitions(Instant::now() + Duration::from_millis(200));
+                    .tick_transitions(Instant::now() + std::time::Duration::from_millis(200));
                 sync_shell_ui(&ui, &mut st);
             }
         });
@@ -504,36 +514,118 @@ fn wire_shell(ui: &HyperShellWindow, rt: Rc<RefCell<ShellRuntime>>) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(cli) = parse_cli().map_err(|e| format!("CLI error: {e}"))? else {
-        return Ok(());
-    };
-
-    let (mut display, mut compositor) = HyperShellState::new(1280, 760)?;
-    let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
-
-    let mut bridge: Box<dyn ShellVmmBridge> = if cli.mock {
+fn build_bridge(cli: &ShellCli) -> Box<dyn ShellVmmBridge> {
+    if cli.mock {
         Box::new(MockShellVmmBridge::with_sample_spaces())
     } else {
         Box::new(UnixVmmBridge::new(&cli.vmm_socket))
-    };
+    }
+}
 
+fn should_use_kms(cli: &ShellCli) -> Result<bool, String> {
+    #[cfg(all(feature = "kms-direct", not(feature = "winit")))]
+    {
+        let _ = cli.kms;
+        Ok(true)
+    }
+    #[cfg(all(feature = "kms-direct", feature = "winit"))]
+    {
+        Ok(cli.kms
+            || (std::env::var_os("WAYLAND_DISPLAY").is_none()
+                && std::env::var_os("DISPLAY").is_none()))
+    }
+    #[cfg(not(feature = "kms-direct"))]
+    {
+        if cli.kms {
+            return Err(
+                "--kms requested, but desktop-shell was built without --features kms".to_string(),
+            );
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(feature = "kms-direct")]
+fn run_kms_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
+    let kms_session = desktop_shell::kms::KmsSession::open_and_install_platform()
+        .map_err(|e| format!("KMS backend init failed: {e}"))?;
+    let (out_w, out_h) = kms_session.size();
+
+    let (display, mut compositor) = HyperShellState::new(out_w as i32, out_h as i32)?;
+    let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
+
+    let mut bridge = build_bridge(&cli);
     let vms = bridge.list_vms().unwrap_or_default();
     if cli.mock {
         seed_mock_workspace_windows(&mut compositor, &vms);
     }
 
-    if cli.headless {
-        println!(
-            "desktop-shell: running Smithay Wayland compositor headlessly (mock={})",
-            cli.mock
-        );
-        let mut dh = display.handle();
-        if let Some(ref sock) = listener {
-            let _ = accept_pending_clients(sock, &mut dh, Some(WindowOrigin::Host));
+    let ui = HyperShellWindow::new()?;
+    let rt = Rc::new(RefCell::new(ShellRuntime {
+        compositor,
+        bridge,
+        mock_mode: cli.mock,
+        vms,
+        sys: SystemStatus::read(cli.mock, None),
+    }));
+    wire_shell(&ui, Rc::clone(&rt));
+
+    let display_rc = Rc::new(RefCell::new(display));
+
+    let on_super_key = {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut st = rt.borrow_mut();
+                st.compositor.handle_super_key();
+                sync_shell_ui(&ui, &mut st);
+            }
         }
-        let _ = display.dispatch_clients(&mut compositor);
-        return Ok(());
+    };
+
+    let on_tick = {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        let disp = Rc::clone(&display_rc);
+        move |now: Instant| {
+            let mut st = rt.borrow_mut();
+            if let Some(ref sock) = listener {
+                let mut dh = disp.borrow().handle();
+                accept_pending_clients(sock, &mut dh, None);
+            }
+            let _ = disp.borrow_mut().dispatch_clients(&mut st.compositor);
+            if st.compositor.tick_transitions(now) > 0 {
+                if let Some(ui) = ui_weak.upgrade() {
+                    sync_shell_ui(&ui, &mut st);
+                }
+            }
+        }
+    };
+
+    let on_telemetry = {
+        let ui_weak = ui.as_weak();
+        let rt = Rc::clone(&rt);
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                sync_shell_ui(&ui, &mut rt.borrow_mut());
+            }
+        }
+    };
+
+    kms_session.run_event_loop(on_super_key, on_tick, on_telemetry)?;
+    Ok(())
+}
+
+#[cfg(feature = "winit")]
+fn run_winit_shell(cli: ShellCli) -> Result<(), Box<dyn std::error::Error>> {
+    let (display, mut compositor) = HyperShellState::new(1280, 760)?;
+    let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
+
+    let mut bridge = build_bridge(&cli);
+    let vms = bridge.list_vms().unwrap_or_default();
+    if cli.mock {
+        seed_mock_workspace_windows(&mut compositor, &vms);
     }
 
     let ui = HyperShellWindow::new()?;
@@ -547,8 +639,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     wire_shell(&ui, Rc::clone(&rt));
 
-    // Low-overhead 60Hz transition + Wayland client pump when animations are active,
-    // and 2s telemetry refresh.
     let anim_timer = Timer::default();
     {
         let ui_weak = ui.as_weak();
@@ -582,6 +672,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.run()?;
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(cli) = parse_cli().map_err(|e| format!("CLI error: {e}"))? else {
+        return Ok(());
+    };
+
+    if cli.headless {
+        let (mut display, mut compositor) = HyperShellState::new(1280, 760)?;
+        let listener = HyperShellState::bind_socket(cli.wayland_socket.as_deref()).ok();
+        let mut bridge = build_bridge(&cli);
+        let vms = bridge.list_vms().unwrap_or_default();
+        if cli.mock {
+            seed_mock_workspace_windows(&mut compositor, &vms);
+        }
+        println!(
+            "desktop-shell: running Smithay Wayland compositor headlessly (mock={})",
+            cli.mock
+        );
+        let mut dh = display.handle();
+        if let Some(ref sock) = listener {
+            let _ = accept_pending_clients(sock, &mut dh, Some(WindowOrigin::Host));
+        }
+        let _ = display.dispatch_clients(&mut compositor);
+        return Ok(());
+    }
+
+    if should_use_kms(&cli)? {
+        #[cfg(feature = "kms-direct")]
+        return run_kms_shell(cli);
+        #[cfg(not(feature = "kms-direct"))]
+        unreachable!("should_use_kms checked kms-direct feature");
+    } else {
+        #[cfg(feature = "winit")]
+        return run_winit_shell(cli);
+        #[cfg(not(feature = "winit"))]
+        unreachable!("should_use_kms requires kms when winit is disabled");
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,9 @@
 
 pub mod action_deck;
 pub mod compositor;
+pub mod framebuffer;
+#[cfg(feature = "kms-direct")]
+pub mod kms;
 pub mod layout;
 pub mod origin;
 pub mod sys_status;
