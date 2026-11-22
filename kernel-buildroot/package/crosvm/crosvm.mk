@@ -20,8 +20,17 @@ define CROSVM_EXTRACT_MINIJAIL
 endef
 CROSVM_POST_EXTRACT_HOOKS += CROSVM_EXTRACT_MINIJAIL
 
+# crosvm pins its own Rust release in ./rust-toolchain, which rustup honours
+# inside the source tree. Make sure that release has the musl standard library
+# (CI and most hosts only install it for "stable").
+CROSVM_RUST_TOOLCHAIN = $(shell sed -n 's/^channel = "\(.*\)"/\1/p' $(@D)/rust-toolchain)
+
 # crosvm's 2D GPU links libwayland; use the image's musl loader and libraries.
 define CROSVM_BUILD_CMDS
+	if command -v rustup >/dev/null 2>&1; then \
+		rustup toolchain install --profile minimal \
+			--target x86_64-unknown-linux-musl "$(CROSVM_RUST_TOOLCHAIN)"; \
+	fi
 	cd $(@D) && $(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) \
 		CARGO_HOME="$(CROSVM_CARGO_HOME)" \
 		HOST_CC="$(HOSTCC)" HOST_CXX="$(HOSTCXX)" \
