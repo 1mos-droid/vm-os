@@ -1,13 +1,19 @@
 # HyperOS architecture and integration contract
 
 This file is the single source of truth for OS, daemon and UI integration. The
-bootstrap targets x86_64 machines with 4 GiB RAM, VT-x/AMD-V enabled, and BIOS/CSM
-boot. The host idle target is **less than 350 MiB used RAM**, measured before any
-VM starts; it is a performance acceptance target, not a measurement established
-by configuration. No desktop, network listener, login shell, or guest is started
-by the base image. USB, Wi-Fi, audio and UEFI-only machines are outside this first
-hardware profile. The virtio GPU driver supports a future UI; no display server
-or GUI is supplied here.
+image targets x86_64 machines with 4 GiB RAM and VT-x/AMD-V enabled, booting via
+UEFI or legacy BIOS/CSM from one hybrid GPT disk image. The host idle target is
+**less than 350 MiB used RAM**, measured before any VM starts; it is a performance
+acceptance target, not a measurement established by configuration, and no real
+measurement has been published yet. No desktop, network listener, login shell, or
+guest is started by the base image. Wi-Fi and audio are disabled in the v1 kernel.
+`desktop-shell/` and `vm-control-ui/` exist as source crates (with `--mock` modes)
+but are **not yet packaged into the image**; no display server or GUI runs on the
+booted host today.
+
+Open review findings and the work plan that addresses them live in
+[`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md). Where a section below says
+"current behavior", it describes the code as it is, not the intended end state.
 
 ## Repository ownership
 
@@ -19,22 +25,32 @@ kernel-buildroot/                  # Buildroot BR2_EXTERNAL=... tree
   configs/busybox.fragment
   kernel/hyperos.config             # minimal seed expanded by olddefconfig
   package/runit/                    # upstream runit, missing from Buildroot
-  board/                           # GRUB, partition image generation
+  package/vmm-daemon/               # builds vmm-daemon for x86_64-unknown-linux-musl
+  package/crosvm/                   # installs a user-supplied prebuilt crosvm (opt-in)
+  initramfs/                        # early-boot init: EROFS + overlay root, data mount/grow
+  board/                           # GRUB (UEFI + BIOS), genimage partition layout
   rootfs-overlay/                   # runit stages and service definitions
-vmm-daemon/                        # Rust daemon + crosvm packaging, separate work
-vm-control-ui/                     # GUI JSON-RPC client, separate work
-guest-images/                     # image import manifests, no guest disks in git
+vmm-daemon/                        # Rust daemon supervising crosvm children
+desktop-shell/                     # Smithay + Slint Wayland shell (source only, not packaged)
+vm-control-ui/                     # Slint VM Studio JSON-RPC client (source only, not packaged)
+guest-images/                     # Alpine / Debian guest disk builders, no disks in git
+docs/                             # testing guides and the review work plan
 scripts/validate-configs.sh         # local/CI acceptance checks
-.github/workflows/build-os.yml      # kernel + rootfs + BIOS disk image artifact
+scripts/test-v1-release.sh          # QEMU boot + lifecycle release runner
+.github/workflows/build-os.yml      # kernel + rootfs + hybrid disk image artifact
+.github/workflows/vmm-daemon-ci.yml # daemon tests (glibc + musl)
 ```
 
-The daemon team supplies musl-compatible `/usr/bin/vmm-daemon` and
-`/usr/bin/crosvm` (and any runtime assets) through Buildroot packaging. The daemon
-accepts no arguments, reads no UI-provided host paths, listens on the socket below,
-uses `/dev/kvm` without software emulation fallback, supervises crosvm children,
-and handles SIGTERM by stopping children and persisting metadata before exit.
-The UI team owns display/session integration. The bootstrap deliberately ships
-neither application nor crosvm; VM launch acceptance requires their integration.
+`/usr/bin/vmm-daemon` is built from `vmm-daemon/` by Buildroot and always
+packaged (`BR2_PACKAGE_VMM_DAEMON=y`). `/usr/bin/crosvm` is **not** built: the
+`crosvm` package only installs a prebuilt binary the builder supplies via
+`BR2_PACKAGE_CROSVM_PREBUILT_BIN`, and it is off in the defconfig, so the default
+image cannot start a VM. The guest kernel is the host's own `/boot/bzImage`
+(direct kernel boot, `root=/dev/vda1`). The daemon accepts no arguments, reads no
+UI-provided host paths, listens on the socket below, uses `/dev/kvm` without
+software emulation fallback, supervises crosvm children, and handles SIGTERM by
+stopping children and persisting metadata before exit. The UI crates own
+display/session integration; packaging them is open work.
 
 ## Local RPC transport and authorization
 
@@ -57,6 +73,10 @@ neither application nor crosvm; VM launch acceptance requires their integration.
   accept UID 0 only. The first UI integration is a trusted local root client;
   do not expose the socket to unprivileged users or forward it over TCP. A later
   unprivileged GUI needs an explicit authorization design and contract change.
+* Current behavior: crosvm children are spawned by the root daemon and keep
+  root as their main-process identity; only crosvm's own jail (pivot-root,
+  seccomp when policies are installed) restricts them. There is no unprivileged
+  crosvm user yet.
 * Only unlink an existing socket after proving no daemon owns it; serialize
   daemon startup. Serialize mutations per VM and storage allocation globally.
   Never interpolate request values into a shell. Canonicalize and validate image
@@ -118,8 +138,10 @@ snapshot plus immutable metadata and returns exactly:
 ```
 
 IDs are generated by the daemon; timestamp is UTC RFC3339 seconds. This is a
-cold disk snapshot, not a RAM/device checkpoint. No restore/delete RPC is defined
-in v1. `set_network_mode` requires stopped; changes are persisted atomically and
+cold disk snapshot, not a RAM/device checkpoint. No restore, list or delete
+snapshot RPC is defined in v1, so snapshots cannot yet be used from the API. The
+storage layer has an internal `ephemeral` flag that purges a VM's disk on stop,
+but no RPC can set it; disposable VMs are not exposed. `set_network_mode` requires stopped; changes are persisted atomically and
 applied at next start. Balloon target resets to maximum at each cold start.
 Success responses are sent only after the operation and metadata commit; on
 failure keep the prior valid state or expose failed, never partial success.
@@ -129,6 +151,11 @@ Network semantics owned by daemon:
 * `isolated`: no virtual NIC, no host/guest or inter-guest network path.
 * `nat`: per-VM TAP/private subnet, host forwarding + masquerade for outbound
   traffic through an existing uplink; no unsolicited inbound or inter-VM traffic.
+  Current behavior: the forward rule only excludes `10.200.0.0/15` (other VMs),
+  so a NAT guest **can reach the uplink's LAN** (router, RFC1918 and link-local
+  hosts) as well as the internet. Rules sit on the forward hook only; there is
+  no per-VM input-hook filter, so guest-to-host traffic relies on the host
+  having no listeners.
 * `host-only`: per-VM TAP/private subnet for host–guest communication; no uplink
   forwarding, NAT, or inter-VM communication.
 
@@ -197,33 +224,53 @@ make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/kernel-buildroot" hyperos_x
 scripts/validate-configs.sh --resolved-buildroot output/.config
 make -C buildroot O="$PWD/output" -j2
 scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
+scripts/validate-configs.sh --image output/images/hyperos.img
 qemu-system-x86_64 -enable-kvm -cpu host -m 4096 -nographic -drive file=output/images/hyperos.img,format=raw,if=virtio
 ```
 
-`hyperos.img` is a complete BIOS disk: GRUB + 128 MiB ext4 read-only root + 512 MiB
-Btrfs starter data partition. This deliberately small data partition must be
-grown offline before importing real guests. Artifact also contains bzImage and
-rootfs.ext2. Writing the full image to a disk destroys that disk's prior contents;
-there is no in-place updater or installer. Boot requires working serial console
-(ttyS0), virtio-blk, AHCI or NVMe; no initramfs is needed because drivers are built
-in. Root uses a fixed MBR PARTUUID; attach only one copy of the image per machine.
+`hyperos.img` is a hybrid GPT disk (protective MBR + BIOS boot code) bootable by
+UEFI and legacy BIOS:
+
+| # | Size | Content | Identifier |
+| --- | --- | --- | --- |
+| 1 | 100 MiB | FAT32 ESP: GRUB (`EFI/BOOT/BOOTX64.EFI` + BIOS core), `boot/bzImage`, `boot/initramfs.cpio.zst` | label `HYPEROS_EFI` |
+| 2 | 512 MiB | read-only EROFS root (LZ4HC, dedupe) | PARTUUID `48595045-0000-4000-8000-000000000002` |
+| 3 | 512 MiB | Btrfs data, mounted at `/var/lib/hyperos` | label `HYPEROS_DATA` |
+
+GRUB offers two entries. Both boot the kernel with an initramfs that mounts the
+EROFS root under a 128 MiB tmpfs OverlayFS upper layer (writes are lost at
+reboot). **Persistent Mode** mounts `HYPEROS_DATA`, and on first boot grows
+partition 3 and the Btrfs filesystem into trailing unallocated space.
+**Stateless RAM-Only Mode** never mounts the disk's data partition; it formats a
+separate zram device as Btrfs for `/var/lib/hyperos`. The artifact also contains
+`bzImage`, `rootfs.erofs`, `initramfs.cpio.zst`, `BOOTX64.EFI` and the packaged
+`vmm-daemon`. Writing the image to a disk destroys that disk's prior contents;
+there is no in-place updater, A/B slot or installer. Nothing verifies the root's
+integrity at boot: no dm-verity, no signed Secure Boot chain, no TPM measurement.
+The kernel is monolithic (`CONFIG_MODULES` unset). Partition UUIDs are fixed;
+attach only one copy of the image per machine.
 
 runit PID 1 mounts proc/sysfs/tmpfs, then supervises zram, KSM, storage and daemon.
 `/run` holds supervision and readiness state so root remains read-only. ZRAM is
 65% of MemTotal, zstd, priority 100; it consumes physical memory on demand and
-is not extra RAM. KSM is enabled globally; daemon must mark guest mappings
-mergeable. Cross-VM page sharing has side-channel implications: this host profile
-is for mutually trusted guests. Stop/reboot via `runit-init 0` / `runit-init 6`;
-shutdown stops daemon before unmounting storage. No guest images are bundled.
+is not extra RAM. Current behavior: `/etc/sv/ksm/run` sets
+`/sys/kernel/mm/ksm/run=1` globally, but neither the daemon nor crosvm marks
+guest memory `MADV_MERGEABLE`, so KSM merges nothing today. Cross-VM page sharing
+has side-channel implications and is unsuitable for untrusted guests; the plan is
+to default it off. Stop/reboot via `runit-init 0` / `runit-init 6`; shutdown stops
+daemon before unmounting storage. No guest images are bundled.
 
 CI keeps ubuntu-latest and explicitly builds host C tools in GNU17 mode; the
 pinned host m4/gnulib predates newer compilers defaulting to C23. This does not
 change the target musl toolchain. Empty `BR2_CMAKE_CANDIDATES` makes Buildroot
 build its pinned CMake 3.31.5 rather than adopting an incompatible host CMake 4.
 
-CI validates shell syntax, source config invariants, resolved Buildroot options,
-and resolved Linux options, builds and uploads the image. On a KVM-capable target,
-verify boot, `/dev/kvm`, Btrfs mount, zram compressor/size, KSM run=1, and shutdown.
+CI uses the Bootlin external musl toolchain with ccache. It validates shell
+syntax, source config invariants, resolved Buildroot options, resolved Linux
+options and the image layout, smoke-tests the packaged musl `vmm-daemon` with
+`list_vms`, and uploads the image. CI never boots the image or starts a VM. On a
+KVM-capable target, verify boot, `/dev/kvm`, Btrfs mount, zram compressor/size,
+the KSM setting, and shutdown.
 After 60 seconds idle with no VM, record `/proc/meminfo`: used = MemTotal -
 MemAvailable must be <358400 KiB. Repeat with integrated daemon/UI, then verify
 VM lifecycle, balloon response, isolation and snapshot consistency. CI compilation

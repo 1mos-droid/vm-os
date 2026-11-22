@@ -1,11 +1,11 @@
 # Cloud & Nested-Virtualization Testing Guide (`docs/CLOUD_TESTING.md`)
 
-This guide provides exact, reproducible commands to boot the compiled HyperOS BIOS disk image (`hyperos.img`) on a nested-virtualization cloud VM with a strict **4 GiB RAM cap (`-m 4G`)** and verify:
+This guide provides exact, reproducible commands to boot the compiled hybrid UEFI/BIOS HyperOS disk image (`hyperos.img`) on a nested-virtualization cloud VM with a strict **4 GiB RAM cap (`-m 4G`)** and verify:
 
 1. Host idle RAM acceptance target (`< 350 MiB` after 60 seconds idle)
 2. `runit` service supervision, `/dev/kvm`, and Btrfs CoW storage (`/var/lib/hyperos`)
 3. **ZRAM** (`zstd`, 65% of `MemTotal`, swap priority `100`)
-4. **KSM** (`/sys/kernel/mm/ksm/run = 1` and cross-VM page merging)
+4. **KSM** setting (`/sys/kernel/mm/ksm/run`; see the note in §4.4)
 5. **`crosvm` & `vmm-daemon`** launch behavior over `/run/hyperos/vmm.sock`
 
 All paths, limits, and JSON-RPC 2.0 payloads match [`ARCHITECTURE.md`](../ARCHITECTURE.md) verbatim.
@@ -51,9 +51,10 @@ sudo modprobe -r kvm_intel && sudo modprobe kvm_intel nested=1
 ### Option A: Download from GitHub Actions CI Artifact
 
 ```sh
-# Download the latest hyperos-x86_64-bios-<sha> artifact from the Build HyperOS workflow
-gh run download --pattern 'hyperos-x86_64-bios-*' --dir ./hyperos-artifact
-cp ./hyperos-artifact/hyperos-x86_64-bios-*/hyperos.img ./hyperos.img
+# Download the latest hyperos-x86_64-hybrid-<sha> artifact from the Build HyperOS workflow
+# (the full image build runs on pushes to main and manual dispatch, not on PRs)
+gh run download --pattern 'hyperos-x86_64-hybrid-*' --dir ./hyperos-artifact
+cp ./hyperos-artifact/hyperos-x86_64-hybrid-*/hyperos.img ./hyperos.img
 ```
 
 ### Option B: Build Locally (Pinned Baseline)
@@ -68,48 +69,33 @@ make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/kernel-buildroot" hyperos_x
 scripts/validate-configs.sh --resolved-buildroot output/.config
 make -C buildroot O="$PWD/output" -j2
 scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
+scripts/validate-configs.sh --image output/images/hyperos.img
 cp output/images/hyperos.img ./hyperos.img
 ```
 
-### Grow the Starter 512 MiB Btrfs Data Partition Offline
+### Give the Data Partition Room to Grow
 
-Per `ARCHITECTURE.md`, `hyperos.img` contains GRUB + a 128 MiB read-only ext4 root (`PARTUUID=48595045-01`) + a **512 MiB Btrfs starter data partition** (`LABEL=hyperos-data`). Grow partition 2 offline before importing guest base images:
+`hyperos.img` has three GPT partitions (see `ARCHITECTURE.md`): `HYPEROS_EFI`
+(FAT32, kernel + initramfs), a 512 MiB read-only EROFS root, and a 512 MiB Btrfs
+`HYPEROS_DATA` partition. In **Persistent Mode** the initramfs grows partition 3
+and its Btrfs filesystem into trailing free space on first boot, so you only need
+to enlarge the image file:
 
 ```sh
-# Expand the raw image by +10 GiB
-truncate -s +10G hyperos.img
-
-# Extend MBR partition 2 to fill the expanded disk
-parted -s hyperos.img resizepart 2 100%
-
-# Attach via loop device and resize the Btrfs filesystem
-LOOP_DEV="$(sudo losetup --find --show --partscan hyperos.img)"
-sudo mkdir -p /mnt/hyperos-data
-sudo mount "${LOOP_DEV}p2" /mnt/hyperos-data
-sudo btrfs filesystem resize max /mnt/hyperos-data
-sudo btrfs filesystem usage /mnt/hyperos-data
-sudo umount /mnt/hyperos-data
-sudo losetup -d "${LOOP_DEV}"
+truncate -s 8G hyperos.img
 ```
 
-> **Note:** `hyperos.img` uses a fixed MBR root `PARTUUID=48595045-01`. Attach only one copy of `hyperos.img` per QEMU machine.
+### (Optional) Stage `crosvm` and a Guest Base Image
 
-### (Optional) Stage `vmm-daemon`, `crosvm`, and a Guest Base Image Offline
-
-The bootstrap image ships neither `/usr/bin/vmm-daemon` nor `/usr/bin/crosvm` nor guest disks (`ARCHITECTURE.md`). To test full VM launch behavior inside HyperOS, stage them onto partitions 1 and 2 before booting:
+`/usr/bin/vmm-daemon` is already in the image. `/usr/bin/crosvm` is not, and the
+EROFS root cannot be edited after the build: supply crosvm at build time with
+`BR2_PACKAGE_CROSVM=y` and `BR2_PACKAGE_CROSVM_PREBUILT_BIN=/path/to/crosvm`
+(see the README). Guest base images go on the data partition (partition 3):
 
 ```sh
 LOOP_DEV="$(sudo losetup --find --show --partscan hyperos.img)"
-sudo mkdir -p /mnt/hyperos-root /mnt/hyperos-data
-
-# Stage musl-compatible vmm-daemon and crosvm into the rootfs partition (p1)
-sudo mount "${LOOP_DEV}p1" /mnt/hyperos-root
-sudo install -m 0755 /path/to/vmm-daemon /mnt/hyperos-root/usr/bin/vmm-daemon
-sudo install -m 0755 /path/to/crosvm /mnt/hyperos-root/usr/bin/crosvm
-sudo umount /mnt/hyperos-root
-
-# Stage a validated guest base image into /var/lib/hyperos/base-images/<image_id>/ (p2)
-sudo mount "${LOOP_DEV}p2" /mnt/hyperos-data
+sudo mkdir -p /mnt/hyperos-data
+sudo mount "${LOOP_DEV}p3" /mnt/hyperos-data
 sudo install -d -o root -g root -m 0700 /mnt/hyperos-data/base-images/alpine-3-21-virtio
 sudo cp --sparse=always ./out/alpine-3-21-virtio/disk.raw /mnt/hyperos-data/base-images/alpine-3-21-virtio/disk.raw
 sudo cp ./out/alpine-3-21-virtio/manifest.json /mnt/hyperos-data/base-images/alpine-3-21-virtio/manifest.json
@@ -117,6 +103,8 @@ sudo chmod 0444 /mnt/hyperos-data/base-images/alpine-3-21-virtio/*
 sudo umount /mnt/hyperos-data
 sudo losetup -d "${LOOP_DEV}"
 ```
+
+There is no import tool yet; this manual step is tracked in `docs/REVIEW_FIXES.md`.
 
 ---
 
@@ -136,7 +124,7 @@ qemu-system-x86_64 \
 
 *(Press `Ctrl-A` then `X` to exit QEMU's serial console if needed. For clean guest shutdown, use `runit-init 0` inside HyperOS.)*
 
-Because the base HyperOS image intentionally starts no login shell by default (`ARCHITECTURE.md`), for interactive verification on a cloud test VM you can interrupt GRUB (`e` during the 1-second timeout) and append `init=/bin/sh` only for low-level debugging, or run a temporary serial getty service in a test overlay while verifying live `runit` supervision.
+Because the base HyperOS image intentionally starts no login shell by default (`ARCHITECTURE.md`), for interactive verification on a cloud test VM you can interrupt GRUB (`e` during the 3-second timeout) and append `init=/bin/sh` only for low-level debugging, or run a temporary serial getty service in a test overlay while verifying live `runit` supervision.
 
 ---
 
@@ -162,7 +150,7 @@ stat -c '%a %U:%G %n' /var/lib/hyperos /var/lib/hyperos/base-images /var/lib/hyp
 Expected results:
 - `/run/hyperos/ready/zram`, `/run/hyperos/ready/ksm`, and `/run/hyperos/ready/storage` all exist.
 - `/dev/kvm` exists (`crw-------` or `crw-rw----`).
-- `/` is `ext4` mounted `ro`; `/var/lib/hyperos` is `btrfs` mounted `rw,noatime,compress=zstd`, mode `700`, owned by `root:root`.
+- `/` is an `overlay` mount (read-only EROFS lower layer, 128 MiB tmpfs upper layer); `/var/lib/hyperos` is `btrfs` mounted `rw,noatime,compress=zstd`, mode `700`, owned by `root:root`.
 
 ### 4.2 Idle Host RAM Target (`< 350 MiB` after 60 s Idle)
 
@@ -206,12 +194,11 @@ Expected results:
 - `/sys/block/zram0/disksize` equals `MemTotal_KiB * 1024 * 65 / 100` (approximately `2730000000` bytes on a `-m 4G` VM).
 - `/sys/block/zram0/mm_stat` prints whitespace-separated integer counters readable by `vm-control-ui`.
 
-### 4.4 Verify KSM (`run = 1` and Page Merging)
+### 4.4 Inspect KSM
 
 ```sh
-# 1. Confirm KSM is enabled globally
+# 1. Current images set this to 1; once KSM defaults off it will read 0
 cat /sys/kernel/mm/ksm/run
-# Expected: 1
 
 # 2. Inspect KSM merge counters before and after starting two identical guests
 grep . /sys/kernel/mm/ksm/pages_shared \
@@ -220,9 +207,9 @@ grep . /sys/kernel/mm/ksm/pages_shared \
        /sys/kernel/mm/ksm/full_scans
 ```
 
-After launching two identical guests whose guest memory mappings are marked `MADV_MERGEABLE` by `vmm-daemon` / `crosvm`, wait for `full_scans` to increment and verify `pages_sharing > 0` (confirming cross-VM page deduplication).
+Neither `vmm-daemon` nor `crosvm` currently marks guest memory `MADV_MERGEABLE`, so expect `pages_sharing` to stay at 0 even with two identical guests running.
 
-> **Security note (`ARCHITECTURE.md`):** Global KSM cross-VM page sharing has side-channel implications and is intended for mutually trusted guests on this host profile.
+> **Security note (`ARCHITECTURE.md`):** Cross-VM page sharing is a side channel and is unsuitable for untrusted guests.
 
 ---
 
@@ -325,4 +312,4 @@ Shut down HyperOS cleanly via `runit`:
 runit-init 0
 ```
 
-Confirm stage 3 (`/etc/runit/3`) stops `vmm-daemon` before running `swapoff /dev/zram0`, `sync`, `umount /var/lib/hyperos`, and `mount -o remount,ro /`, and QEMU exits cleanly without Btrfs corruption.
+Confirm stage 3 (`/etc/runit/3`) stops `vmm-daemon` before running `swapoff /dev/zram0`, `sync`, `umount /var/lib/hyperos`, and `mount -o remount,ro /` (a no-op on the overlay root), and QEMU exits cleanly without Btrfs corruption.

@@ -7,11 +7,25 @@ HyperOS is a minimal, security-focused `x86_64` virtualization host OS built to 
   - **Partition 2 (`512M`, read-only `EROFS`):** LZ4HC-compressed, deduplicated immutable root filesystem combined at boot with a `128M` `tmpfs` `OverlayFS` upper layer so host logs and temp writes never wear USB flash.
   - **Partition 3 (`512M` initial, Btrfs `HYPEROS_DATA`):** Mounted at `/var/lib/hyperos` with `compress=zstd:3,noatime,commit=120`. In **Persistent Mode**, the early-boot initramfs **automatically expands Partition 3 and grows Btrfs (`btrfs filesystem resize max`) into trailing unallocated space on first boot**. In **Stateless RAM-Only Mode**, `/var/lib/hyperos` runs on a dedicated ZRAM-backed Btrfs volume without touching any disk.
 - **Host Idle RAM Acceptance Target:** `< 350 MiB` used RAM (`MemTotal - MemAvailable`) before any VM starts (measured on a booted target image — publish headless and `desktop-shell` measurements from real runs before treating this target as a benchmark claim).
-- **Memory & Storage Efficiency:** `zstd` ZRAM swap (`/dev/zram0`, 65% of `MemTotal`, priority 100), global KSM page merging, `virtio-balloon` dynamic memory control, strict `MemTotal - 768 MiB` RAM admission control, and zero-overhead Btrfs copy-on-write (`cp --reflink=always` / `FICLONE`) VM disks with cold read-only subvolume snapshots.
+- **Memory & Storage Efficiency:** `zstd` ZRAM swap (`/dev/zram0`, 65% of `MemTotal`, priority 100), `virtio-balloon` dynamic memory control, strict `MemTotal - 768 MiB` RAM admission control, and zero-overhead Btrfs copy-on-write (`cp --reflink=always` / `FICLONE`) VM disks with cold read-only subvolume snapshots.
 - **v1 Hardware Profile:** Built-in monolithic Linux `6.12.20` drivers for QEMU/KVM (`virtio-*`), USB 3.0 UAS, NVMe, AHCI, I2C HID touchpads, and Intel (`i915`), AMD (`amdgpu`), and `simpledrm` displays. Wireless (`WLAN`) and local ALSA `SOUND` are intentionally disabled in the v1 monolithic kernel profile; `desktop-shell` and `vm-control-ui` probe real sysfs/procfs capabilities and mark Wi-Fi/Audio unavailable when absent.
+- **KSM:** the kernel has `CONFIG_KSM` and `/etc/sv/ksm/run` sets `run=1`, but guest memory is not marked `MADV_MERGEABLE`, so nothing is merged today. Cross-VM page sharing is a side channel; it is planned to default off.
 - **Contract-Driven Integration:** Every Unix socket path, JSON-RPC 2.0 schema, error code, and storage path is specified verbatim in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 > **Warning before writing `hyperos.img` to a drive:** Flashing `hyperos.img` overwrites the target drive's partition table, and booting **Persistent Mode** automatically expands Partition 3 (`HYPEROS_DATA`) into any unallocated space behind it on first boot. Use a dedicated USB pendrive, internal drive, or scratch disk image.
+
+## Current Status & Known Gaps
+
+HyperOS is a working virtualization host foundation, not yet a finished security or research OS. What the default image does **not** do yet:
+
+- **Start a VM.** `crosvm` is not built; you must supply a prebuilt binary (see *Packaging `crosvm`* below). There is no base-image import tool, so guest disks are staged by hand.
+- **Run a GUI.** `desktop-shell/` and `vm-control-ui/` build and run in `--mock` mode on a developer machine but are not packaged into `hyperos.img`.
+- **Keep NAT guests off your LAN.** `nat` mode only blocks other VMs (`10.200.0.0/15`); guests can reach the uplink's local network.
+- **Drop root.** `vmm-daemon` and `crosvm` run as root (crosvm keeps its jail/seccomp), and only UID 0 may use the control socket.
+- **Verify boot.** No dm-verity, signed Secure Boot or TPM measurement; no A/B updates.
+- **Restore snapshots, run disposable VMs or capture traffic.** Snapshots can be taken but not restored, listed or deleted through the API.
+
+The plan for closing these gaps is in [`docs/REVIEW_FIXES.md`](docs/REVIEW_FIXES.md).
 
 ---
 
@@ -26,8 +40,8 @@ LICENSE-MIT / LICENSE-APACHE # Dual-license terms (MIT OR Apache-2.0)
 kernel-buildroot/            # Buildroot BR2_EXTERNAL tree (Linux 6.12.20, runit, vmm-daemon,
                              #   crosvm packaging, initramfs, hybrid GRUB2, nftables, iproute2)
 vmm-daemon/                  # Rust VM daemon supervising crosvm children over Unix RPC
-desktop-shell/               # Workspace-First Wayland compositor (Smithay + Slint, --mock)
-vm-control-ui/               # Zero-Script VM Studio desktop GUI client (Slint, --mock)
+desktop-shell/               # Workspace-First Wayland compositor (Smithay + Slint, --mock; not yet in image)
+vm-control-ui/               # Zero-Script VM Studio desktop GUI client (Slint, --mock; not yet in image)
 guest-images/                # Reproducible Alpine & Debian Slim CoW base image builders
 docs/                        # Cloud nested-virtualization testing and operational guides
 scripts/                     # Config/image validator, v1 release runner, GNU17 CC wrapper
@@ -43,7 +57,7 @@ scripts/                     # Config/image validator, v1 release runner, GNU17 
 - **Transport:** `/run/hyperos/vmm.sock` (`AF_UNIX`/`SOCK_STREAM`, `root:root`, mode `0600`, parent `/run/hyperos` `0700`, `SO_PEERCRED` UID 0 only)
 - **Framing:** Single-line UTF-8 JSON-RPC 2.0 object terminated by LF (`\n`), max 65,536 bytes; no batches, notifications, positional params, or unknown keys
 - **Methods:** `create_vm`, `start_vm`, `stop_vm`, `pause_vm`, `snapshot_vm`, `set_balloon_ram`, `set_network_mode`, `list_vms`
-- **Network sandboxing:** `isolated` (no virtual NIC), `nat` (per-VM TAP + `nftables` outbound masquerade), or `host-only` (per-VM isolated bridge for host–guest traffic only)
+- **Network sandboxing:** `isolated` (no virtual NIC), `nat` (per-VM TAP + `nftables` outbound masquerade; currently also reaches the uplink LAN), or `host-only` (per-VM isolated bridge for host–guest traffic only)
 - **Admission control:** Total maximum RAM of running/paused guests must not exceed `MemTotal - 768 MiB` (ZRAM swap is not admission capacity)
 
 ### Persistent Btrfs CoW Storage

@@ -11,7 +11,7 @@ Privileged Rust control-plane daemon supervising `crosvm` child processes for Hy
 - **Zero-Overhead Btrfs CoW Storage & Persistence (`src/storage.rs`):**
   - Validates `manifest.json` SHA-256 checksums and rejects symlink traversal outside `/var/lib/hyperos/base-images/`.
   - Clones base disks with `cp --reflink=always` into per-VM Btrfs subvolumes (`instances/<vm_id>/current/disk.raw`), rejecting non-reflink filesystems in production without full-copy fallback.
-  - Persists `metadata.json` atomically (`write` -> `fsync` -> `rename` -> `fsync(dir)`), creates cold read-only Btrfs subvolume snapshots (`snapshots/<snapshot_id>/` + `snapshot-metadata/<snapshot_id>.json`), recovers interrupted staging on startup, and deletes CoW overlays + runtime artifacts immediately on `stop_vm` or unexpected `crosvm` crash for VMs marked `ephemeral`.
+  - Persists `metadata.json` atomically (`write` -> `fsync` -> `rename` -> `fsync(dir)`), creates cold read-only Btrfs subvolume snapshots (`snapshots/<snapshot_id>/` + `snapshot-metadata/<snapshot_id>.json`), and recovers interrupted staging on startup. The storage layer can purge a VM's CoW overlay on stop for an internal `ephemeral` flag, but no RPC sets it yet, so disposable VMs are not reachable through the API.
 - **`crosvm` Supervision, Ballooning & Network Sandboxing (`src/hypervisor.rs`, `src/network.rs`, `src/manager.rs`):**
   - Spawns `crosvm run` with `virtio-blk`, `virtio-balloon`, `virtio-vsock`, `virtio-gpu`, jail/seccomp, and optional `virtio-net` TAP.
   - Wires `pause_vm` (`crosvm suspend`), resume (`crosvm resume`), `set_balloon_ram` (`crosvm balloon <bytes>`), `stop_vm` (`crosvm stop` + signal/reap), and runtime snapshot helper (`crosvm snapshot take`).
