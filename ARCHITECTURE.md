@@ -33,6 +33,7 @@ kernel-buildroot/                  # Buildroot BR2_EXTERNAL=... tree
 vmm-daemon/                        # Rust daemon supervising crosvm children
 desktop-shell/                     # Smithay + Slint Wayland shell (optional package, off by default)
 vm-control-ui/                     # Slint VM Studio JSON-RPC client (optional package, off by default)
+ui-kit/                            # Strata design system + Inter font shared by both UIs
 guest-images/                     # Alpine / Debian guest disk builders, no disks in git
 docs/                             # testing guides and the review work plan
 scripts/validate-configs.sh         # local/CI acceptance checks

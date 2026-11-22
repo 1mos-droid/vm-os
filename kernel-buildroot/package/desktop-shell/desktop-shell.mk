@@ -24,4 +24,12 @@ define DESKTOP_SHELL_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/br-target/x86_64-unknown-linux-musl/release/desktop-shell $(TARGET_DIR)/usr/bin/desktop-shell
 endef
 
+# Shared Strata design system (ui-kit/: Slint components and Inter fonts).
+# build.rs finds it at ./ui-kit inside the build directory.
+define DESKTOP_SHELL_COPY_UI_KIT
+	rm -rf $(@D)/ui-kit
+	cp -a $(BR2_EXTERNAL_HYPEROS_PATH)/../ui-kit $(@D)/ui-kit
+endef
+DESKTOP_SHELL_POST_RSYNC_HOOKS += DESKTOP_SHELL_COPY_UI_KIT
+
 $(eval $(generic-package))

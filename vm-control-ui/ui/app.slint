@@ -1,4 +1,11 @@
-import { Button, CheckBox, LineEdit, Palette, ScrollView, Slider } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+import {
+    Theme, Backdrop, Card, Separator, LargeTitle, Title, Headline, Body, Caption, SectionTitle,
+    PushButton, IconButton, Chip, StatusDot, Switch, Segmented, Meter, Field, RangeSlider,
+    Tile, ListGroup, ListRow, OptionCard, Toast, Sheet, Icon,
+} from "strata.slint";
+
+export { Theme }
 
 export struct VmItem {
     vm-id: string,
@@ -63,87 +70,8 @@ export struct StoreCardItem {
     busy: bool,
 }
 
-component MeterBar inherits Rectangle {
-    in property <float> ratio: 0.0;
-    in property <color> fill-color: #06b6d4;
-    height: 9px;
-    border-radius: 5px;
-    background: Theme.surface-elevated;
-    clip: true;
-
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        height: parent.height;
-        width: parent.width * Math.clamp(root.ratio, 0.0, 1.0);
-        border-radius: 5px;
-        background: root.fill-color;
-    }
-}
-
-component PillBadge inherits Rectangle {
-    in property <string> text;
-    in property <color> bg: #1e293b;
-    in property <color> fg: #e2e8f0;
-    border-radius: 10px;
-    background: root.bg;
-    horizontal-stretch: 0;
-
-    HorizontalLayout {
-        padding-left: 9px;
-        padding-right: 9px;
-        padding-top: 3px;
-        padding-bottom: 3px;
-        Text {
-            text: root.text;
-            color: root.fg;
-            font-size: 11px;
-            font-weight: 600;
-            vertical-alignment: center;
-        }
-    }
-}
-
-export global Theme {
-    in-out property <string> id: "obsidian";
-    in-out property <string> name: "HyperOS Obsidian";
-    in-out property <string> layout-preset: "compact";
-    in-out property <int> density-level: 0;
-
-    in-out property <color> window-bg: #090d16;
-    in-out property <color> canvas-bg: #0f172a;
-    in-out property <color> surface-bg: #111827;
-    in-out property <color> surface-elevated: #162033;
-    in-out property <color> border: #243247;
-    in-out property <color> text-primary: #f8fafc;
-    in-out property <color> text-secondary: #cbd5e1;
-    in-out property <color> text-muted: #94a3b8;
-    in-out property <color> accent: #06b6d4;
-    in-out property <color> danger: #ef4444;
-    in-out property <color> success: #10b981;
-
-    in-out property <string> ui-font-family: "DejaVu Sans";
-    in-out property <string> mono-font-family: "DejaVu Sans Mono";
-    in-out property <length> font-base: 12px;
-    in-out property <length> font-heading: 18px;
-
-    in-out property <length> radius-sm: 8px;
-    in-out property <length> radius-md: 10px;
-    in-out property <length> radius-lg: 16px;
-    in-out property <length> radius-pill: 15px;
-
-    in-out property <length> space-xs: 6px;
-    in-out property <length> space-sm: 8px;
-    in-out property <length> space-md: 12px;
-    in-out property <length> space-lg: 16px;
-
-    public function sync-palette(dark: bool) {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
-    }
-}
-
 export component MainWindow inherits Window {
-    title: "HyperOS — Zero-Script VM Studio";
+    title: "VM Studio — HyperOS";
     preferred-width: 1100px;
     preferred-height: 780px;
     min-width: 880px;
@@ -151,7 +79,6 @@ export component MainWindow inherits Window {
     default-font-family: Theme.ui-font-family;
     default-font-size: Theme.font-base;
     background: Theme.window-bg;
-    init => { Palette.color-scheme = ColorScheme.dark; }
 
     // Navigation: 0 = Spaces, 1 = Create Space, 2 = Template Store, 3 = Guided Settings
     in-out property <int> active-tab: 0;
@@ -237,326 +164,317 @@ export component MainWindow inherits Window {
     callback use-store-template(string);
     callback settings-changed();
 
-    VerticalLayout {
-        padding: Theme.space-lg;
-        spacing: Theme.space-md;
+    property <string> page-title:
+        root.active-tab == 0 ? "Spaces" :
+        root.active-tab == 1 ? "New Space" :
+        root.active-tab == 2 ? "Templates" : "Settings";
+    property <string> page-subtitle:
+        root.active-tab == 0 ? "Each Space is its own hardware-isolated virtual machine." :
+        root.active-tab == 1 ? "Pick what this Space is for. HyperOS sets up the disk, memory and network." :
+        root.active-tab == 2 ? "Verified base images that new Spaces start from. Downloads are checked against their SHA-256." :
+        "Preferences for this computer.";
 
-        // ================= TOP STUDIO RAIL =================
+    Backdrop { intensity: 0.55; }
+
+    HorizontalLayout {
+        // ================= SIDEBAR =================
         Rectangle {
-            height: 56px;
-            border-radius: Theme.radius-md;
-            background: Theme.surface-bg;
-            border-width: 1px;
-            border-color: Theme.border;
+            width: 232px;
+            background: Theme.bar-glass;
 
-            HorizontalLayout {
-                padding-left: Theme.space-lg;
-                padding-right: Theme.space-lg;
-                spacing: Theme.space-md;
-                alignment: space-between;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.separator;
+            }
 
+            VerticalLayout {
+                padding: 14px;
+                padding-top: 18px;
+                spacing: 4px;
+
+                // Brand
                 HorizontalLayout {
+                    padding-left: 6px;
+                    padding-bottom: 16px;
                     spacing: 10px;
-                    alignment: start;
-
-                    Text {
-                        text: "HyperOS Studio";
-                        color: Theme.text-primary;
-                        font-size: Theme.font-heading;
-                        font-weight: 800;
-                        vertical-alignment: center;
+                    Tile {
+                        icon: "grid";
+                        tint: Theme.accent;
+                        tile-size: 30px;
                     }
-
-                    HorizontalLayout {
-                        spacing: Theme.space-xs;
-                        Rectangle {
-                            width: 9px;
-                            height: 9px;
-                            y: 23px;
-                            border-radius: 5px;
-                            background: root.backend-connected ? Theme.success : Theme.danger;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 0px;
+                        Text {
+                            text: "VM Studio";
+                            color: Theme.text-primary;
+                            font-size: Theme.size-headline;
+                            font-weight: 700;
                         }
                         Text {
-                            text: root.backend-label;
+                            text: "HyperOS";
                             color: Theme.text-muted;
-                            font-family: Theme.mono-font-family;
-                            font-size: 11px;
+                            font-size: Theme.size-caption;
+                        }
+                    }
+                }
+
+                for nav[i] in [
+                    { label: "Spaces", icon: "grid" },
+                    { label: "New Space", icon: "plus" },
+                    { label: "Templates", icon: "package" },
+                    { label: "Settings", icon: "sliders" },
+                ] : Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-sm;
+                    background: root.active-tab == i ? Theme.accent-soft : nav-ta.has-hover ? Theme.fill-hover : transparent;
+                    animate background { duration: 120ms; }
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        Icon {
+                            name: nav.icon;
+                            size: 17px;
+                            color: root.active-tab == i ? Theme.accent : Theme.text-secondary;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: nav.label;
+                            color: root.active-tab == i ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.size-body;
+                            font-weight: root.active-tab == i ? 600 : 500;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if i == 0 && root.vms.length > 0 : Text {
+                            text: root.vms.length;
+                            color: Theme.text-muted;
+                            font-size: Theme.size-footnote;
                             vertical-alignment: center;
                         }
                     }
-
-                    if root.mock-mode : PillBadge {
-                        text: "MOCK";
-                        bg: #312e81;
-                        fg: #e0e7ff;
+                    nav-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.active-tab = i; }
                     }
                 }
 
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: end;
+                Rectangle { vertical-stretch: 1; }
 
-                    Button {
-                        text: "Spaces";
-                        primary: root.active-tab == 0;
-                        clicked => { root.active-tab = 0; }
-                    }
-                    Button {
-                        text: "+ Create Space";
-                        primary: root.active-tab == 1;
-                        clicked => { root.active-tab = 1; }
-                    }
-                    Button {
-                        text: "Template Store";
-                        primary: root.active-tab == 2;
-                        clicked => { root.active-tab = 2; }
-                    }
-                    Button {
-                        text: "Settings";
-                        primary: root.active-tab == 3;
-                        clicked => { root.active-tab = 3; }
-                    }
-                    Button {
-                        text: "Refresh";
-                        clicked => { root.refresh-requested(); }
-                    }
-                }
-            }
-        }
-
-        // Status Notification Banner
-        if root.status-message != "" : Rectangle {
-            border-radius: 8px;
-            background: root.status-is-error ? #450a0a : #052e16;
-            border-width: 1px;
-            border-color: root.status-is-error ? #dc2626 : #10b981;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                Text {
-                    text: root.status-message;
-                    color: root.status-is-error ? #fecaca : #bbf7d0;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-            }
-        }
-
-        // ================= TAB 0: SPACES & VISUAL CHECKPOINTS =================
-        if root.active-tab == 0 : VerticalLayout {
-            spacing: Theme.space-md;
-            vertical-stretch: 1;
-
-            // Live Memory Strip + Reclaim RAM
-            HorizontalLayout {
-                spacing: Theme.space-sm;
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    border-radius: Theme.radius-md;
-                    background: Theme.surface-bg;
-                    border-width: 1px;
-                    border-color: Theme.border;
-
+                // Host memory
+                Card {
+                    vertical-stretch: 0;
                     VerticalLayout {
-                        padding: Theme.space-md;
-                        spacing: 7px;
+                        padding: 12px;
+                        spacing: 8px;
                         HorizontalLayout {
-                            alignment: space-between;
-                            Text { text: "Host Memory"; color: Theme.text-muted; font-size: Theme.font-base; font-weight: 600; }
-                            Text { text: root.ram-summary; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
+                            SectionTitle { text: "MEMORY"; horizontal-stretch: 1; }
+                            Text {
+                                text: root.ram-summary;
+                                color: Theme.text-secondary;
+                                font-size: Theme.size-caption;
+                                font-weight: 500;
+                            }
                         }
-                        MeterBar {
+                        Meter {
                             ratio: root.ram-usage-ratio;
-                            fill-color: root.ram-usage-ratio > 0.85 ? Theme.danger : root.ram-usage-ratio > 0.65 ? #f59e0b : Theme.accent;
+                            fill: root.ram-usage-ratio > 0.85 ? Theme.danger : root.ram-usage-ratio > 0.65 ? Theme.warning : Theme.accent;
                         }
-                        Text { text: root.ram-detail; color: Theme.text-muted; font-size: 11px; }
-                    }
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    border-radius: Theme.radius-md;
-                    background: Theme.surface-bg;
-                    border-width: 1px;
-                    border-color: Theme.border;
-
-                    VerticalLayout {
-                        padding: Theme.space-md;
-                        spacing: 7px;
                         HorizontalLayout {
-                            alignment: space-between;
-                            Text { text: "Compressed Memory (ZRAM)"; color: Theme.text-muted; font-size: Theme.font-base; font-weight: 600; }
-                            Text { text: root.zram-summary; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
+                            SectionTitle { text: "ZRAM"; horizontal-stretch: 1; }
+                            Text {
+                                text: root.zram-summary;
+                                color: Theme.text-secondary;
+                                font-size: Theme.size-caption;
+                                font-weight: 500;
+                            }
                         }
-                        MeterBar { ratio: root.zram-usage-ratio; fill-color: #8b5cf6; }
-                        Text { text: root.zram-detail; color: Theme.text-muted; font-size: 11px; }
+                        Meter {
+                            ratio: root.zram-usage-ratio;
+                            fill: Theme.info;
+                        }
+                        PushButton {
+                            text: "Reclaim memory";
+                            icon: "bolt";
+                            kind: "secondary";
+                            small: true;
+                            horizontal-stretch: 1;
+                            clicked => { root.reclaim-ram-requested(); }
+                        }
                     }
                 }
 
-                Rectangle {
-                    width: 165px;
-                    border-radius: Theme.radius-md;
-                    background: #064e3b;
-                    border-width: 1px;
-                    border-color: Theme.success;
-
-                    TouchArea {
-                        clicked => { root.reclaim-ram-requested(); }
+                // Connection
+                HorizontalLayout {
+                    padding-top: 8px;
+                    padding-left: 6px;
+                    spacing: 8px;
+                    StatusDot {
+                        dot-color: root.backend-connected ? Theme.success : Theme.danger;
                     }
-
-                    VerticalLayout {
-                        alignment: center;
-                        padding: 10px;
-                        spacing: 4px;
-                        Text {
-                            text: "⚡ Reclaim RAM";
-                            color: #a7f3d0;
-                            font-size: 13px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Shrink idle Space balloons";
-                            color: #6ee7b7;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
+                    Text {
+                        text: root.mock-mode ? "Demo data" : root.backend-connected ? "Connected" : "Not connected";
+                        color: Theme.text-muted;
+                        font-size: Theme.size-caption;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
                     }
+                    if root.mock-mode : Chip { text: "Mock"; tone: "info"; }
+                }
+            }
+        }
+
+        // ================= CONTENT =================
+        VerticalLayout {
+            horizontal-stretch: 1;
+
+            // Header bar
+            HorizontalLayout {
+                padding-left: 32px;
+                padding-right: 24px;
+                padding-top: 22px;
+                padding-bottom: 14px;
+                spacing: 12px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    LargeTitle { text: root.page-title; }
+                    Caption { text: root.page-subtitle; }
+                }
+                IconButton {
+                    icon: "refresh";
+                    clicked => { root.refresh-requested(); }
+                }
+                if root.active-tab == 0 : PushButton {
+                    text: "New Space";
+                    icon: "plus";
+                    kind: "primary";
+                    clicked => { root.active-tab = 1; }
                 }
             }
 
-            // Active Spaces & Checkpoints ScrollView
-            ScrollView {
+            // ---------- Spaces ----------
+            if root.active-tab == 0 : ScrollView {
                 vertical-stretch: 1;
-
                 VerticalLayout {
-                    spacing: Theme.space-md;
+                    padding-left: 32px;
+                    padding-right: 28px;
+                    padding-bottom: 32px;
+                    spacing: 12px;
                     alignment: start;
 
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "Your Spaces (" + root.vms.length + ")";
-                            color: Theme.text-primary;
-                            font-size: 15px;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: "Every Space is isolated with its own colored window border";
-                            color: Theme.text-muted;
-                            font-size: 11px;
-                        }
-                    }
-
-                    if root.vms.length == 0 : Rectangle {
-                        height: 140px;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
+                    if root.vms.length == 0 : Card {
+                        height: 220px;
                         VerticalLayout {
                             alignment: center;
                             spacing: 10px;
+                            HorizontalLayout {
+                                alignment: center;
+                                Tile { icon: "sparkle"; tile-size: 52px; }
+                            }
                             Text {
-                                text: "No Spaces yet — create one in plain English in seconds.";
-                                color: Theme.text-secondary;
-                                font-size: 14px;
+                                text: "No Spaces yet";
+                                color: Theme.text-primary;
+                                font-size: Theme.size-title3;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "A Space is a disposable or persistent VM for one job.";
+                                color: Theme.text-muted;
+                                font-size: Theme.size-body;
                                 horizontal-alignment: center;
                             }
                             HorizontalLayout {
                                 alignment: center;
-                                Button {
-                                    text: "+ Create Your First Space";
-                                    primary: true;
+                                PushButton {
+                                    text: "Create your first Space";
+                                    kind: "primary";
                                     clicked => { root.active-tab = 1; }
                                 }
                             }
                         }
                     }
 
-                    for vm in root.vms : Rectangle {
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 2px;
-                        border-color: vm.accent;
-
+                    for vm in root.vms : Card {
                         VerticalLayout {
-                            padding: Theme.space-md;
-                            spacing: Theme.space-sm;
+                            padding: 16px;
+                            padding-left: 18px;
+                            spacing: 14px;
 
                             HorizontalLayout {
-                                alignment: space-between;
-                                spacing: Theme.space-md;
+                                spacing: 14px;
+
+                                Tile {
+                                    icon: vm.network-mode == "nat" ? "globe" : vm.network-mode == "host-only" ? "home" : "lock";
+                                    tint: vm.accent;
+                                    tile-size: 44px;
+                                    badge: vm.disposable ? "hourglass" : "";
+                                }
 
                                 VerticalLayout {
-                                    spacing: 5px;
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 4px;
                                     HorizontalLayout {
-                                        spacing: Theme.space-sm;
-                                        Text {
+                                        spacing: 8px;
+                                        Headline {
                                             text: vm.name;
-                                            color: Theme.text-primary;
-                                            font-size: 15px;
-                                            font-weight: 700;
                                             vertical-alignment: center;
+                                            overflow: elide;
                                         }
-                                        PillBadge {
-                                            text: vm.state;
-                                            bg: vm.state == "running" ? #065f46 : vm.state == "paused" ? #78350f : vm.state == "failed" ? #7f1d1d : #1e293b;
-                                            fg: #f8fafc;
+                                        Chip {
+                                            text: vm.state == "running" ? "Running" : vm.state == "paused" ? "Paused" : vm.state == "failed" ? "Failed" : "Stopped";
+                                            tone: vm.state == "running" ? "success" : vm.state == "paused" ? "warning" : vm.state == "failed" ? "danger" : "neutral";
+                                            dot: true;
                                         }
-                                        PillBadge {
-                                            text: vm.network-plain-label;
-                                            bg: vm.network-mode == "nat" ? #083344 : #1e293b;
-                                            fg: vm.network-mode == "nat" ? #67e8f9 : #cbd5e1;
+                                        if vm.capture-active : Chip {
+                                            text: "Recording";
+                                            tone: "danger";
+                                            icon: "record";
                                         }
-                                        PillBadge {
-                                            text: vm.display-mode-label;
-                                            bg: #172554;
-                                            fg: #93c5fd;
-                                        }
-                                        if vm.disposable : PillBadge {
-                                            text: "DISPOSABLE";
-                                            bg: #7c2d12;
-                                            fg: #ffedd5;
-                                        }
+                                        Rectangle { horizontal-stretch: 1; }
                                     }
-
                                     Text {
-                                        text: "Template: " + vm.base-image-id + "  •  " + vm.vcpu-count + " vCPU  •  Active RAM: " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB  •  Snapshots: " + (vm.disposable ? "Disabled" : vm.checkpoint-count);
+                                        text: vm.base-image-id + "  ·  " + vm.vcpu-count + " vCPU  ·  " + vm.balloon-target-mib + " / " + vm.ram-mib + " MiB";
                                         color: Theme.text-muted;
-                                        font-size: Theme.font-base;
+                                        font-size: Theme.size-footnote;
+                                        overflow: elide;
                                     }
                                 }
 
-                                // Primary Controls + Snapshot Save
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 4px;
                                     alignment: end;
-
-                                    Button {
-                                        text: vm.state == "paused" ? "Resume" : "Open";
-                                        enabled: vm.state != "running";
-                                        primary: vm.state == "stopped" || vm.state == "paused";
-                                        clicked => { root.start-vm(vm.vm-id); }
-                                    }
-                                    Button {
-                                        text: "Pause";
-                                        enabled: vm.state == "running";
-                                        clicked => { root.pause-vm(vm.vm-id); }
-                                    }
-                                    Button {
-                                        text: "Save Snapshot";
+                                    IconButton {
+                                        icon: "camera";
                                         enabled: vm.state == "stopped" && !vm.disposable;
                                         clicked => { root.snapshot-vm(vm.vm-id); }
                                     }
-                                    Button {
-                                        text: "Close";
-                                        enabled: vm.state == "running" || vm.state == "paused";
+                                    IconButton {
+                                        icon: "record";
+                                        active: vm.capture-active;
+                                        tint: vm.capture-active ? Theme.danger : Theme.text-secondary;
+                                        enabled: vm.capture-active || (vm.state == "running" && vm.capture-supported);
+                                        clicked => {
+                                            if (vm.capture-active) {
+                                                root.stop-capture(vm.vm-id);
+                                            } else {
+                                                root.start-capture(vm.vm-id);
+                                            }
+                                        }
+                                    }
+                                    if vm.state == "running" : IconButton {
+                                        icon: "pause";
+                                        clicked => { root.pause-vm(vm.vm-id); }
+                                    }
+                                    if vm.state == "running" || vm.state == "paused" : PushButton {
+                                        text: "Stop";
+                                        icon: "power";
+                                        kind: "danger";
                                         clicked => {
                                             root.confirm-stop-vm-id = vm.vm-id;
                                             root.confirm-stop-vm-name = vm.name;
@@ -564,199 +482,149 @@ export component MainWindow inherits Window {
                                             root.confirm-stop-visible = true;
                                         }
                                     }
+                                    if vm.state != "running" : PushButton {
+                                        text: vm.state == "paused" ? "Resume" : "Start";
+                                        icon: "play";
+                                        kind: "primary";
+                                        clicked => { root.start-vm(vm.vm-id); }
+                                    }
                                 }
                             }
 
-                            // Secondary strip: ballooning / network switch + packet capture controls
+                            Separator {}
+
                             HorizontalLayout {
-                                alignment: space-between;
-                                spacing: 8px;
+                                spacing: 6px;
+                                Chip {
+                                    text: vm.network-plain-label;
+                                    icon: vm.network-mode == "nat" ? "globe" : vm.network-mode == "host-only" ? "home" : "lock";
+                                    tone: vm.network-mode == "nat" ? "accent" : vm.network-mode == "host-only" ? "info" : "neutral";
+                                }
+                                Chip {
+                                    text: vm.display-mode-label;
+                                    icon: "window";
+                                }
+                                if vm.disposable : Chip {
+                                    text: "Disposable";
+                                    icon: "hourglass";
+                                    tone: "warning";
+                                }
+                                if !vm.disposable && vm.checkpoint-count > 0 : Chip {
+                                    text: vm.checkpoint-count == 1 ? "1 snapshot" : vm.checkpoint-count + " snapshots";
+                                    icon: "camera";
+                                }
+                                if vm.capture-supported && !vm.capture-active && vm.capture-status-label != "" : Chip {
+                                    text: vm.capture-status-label;
+                                    icon: "record";
+                                }
+
+                                Rectangle { horizontal-stretch: 1; }
 
                                 if vm.state == "running" : HorizontalLayout {
-                                    spacing: Theme.space-xs;
-                                    Text {
-                                        text: "Memory Balloon:";
-                                        color: Theme.text-muted;
-                                        font-size: 11px;
+                                    spacing: 4px;
+                                    horizontal-stretch: 0;
+                                    Caption {
+                                        text: "Memory";
                                         vertical-alignment: center;
                                     }
-                                    Button {
-                                        text: "−128 MiB";
+                                    IconButton {
+                                        icon: "minus";
+                                        button-size: 28px;
                                         enabled: vm.balloon-target-mib > 128;
                                         clicked => { root.adjust-balloon-ram(vm.vm-id, Math.max(128, vm.balloon-target-mib - 128)); }
                                     }
-                                    Button {
-                                        text: "+128 MiB";
+                                    Text {
+                                        text: vm.balloon-target-mib + " MiB";
+                                        color: Theme.text-primary;
+                                        font-size: Theme.size-footnote;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        min-width: 64px;
+                                        horizontal-alignment: center;
+                                    }
+                                    IconButton {
+                                        icon: "plus";
+                                        button-size: 28px;
                                         enabled: vm.balloon-target-mib < vm.ram-mib;
                                         clicked => { root.adjust-balloon-ram(vm.vm-id, Math.min(vm.ram-mib, vm.balloon-target-mib + 128)); }
                                     }
-                                    if vm.desired-min-ram-mib >= 128 && vm.desired-min-ram-mib < vm.ram-mib && vm.balloon-target-mib != vm.desired-min-ram-mib : Button {
-                                        text: "Fit to " + vm.desired-min-ram-mib + " MiB";
+                                    if vm.desired-min-ram-mib >= 128 && vm.desired-min-ram-mib < vm.ram-mib && vm.balloon-target-mib != vm.desired-min-ram-mib : PushButton {
+                                        text: "Fit " + vm.desired-min-ram-mib;
+                                        kind: "ghost";
+                                        small: true;
                                         clicked => { root.adjust-balloon-ram(vm.vm-id, vm.desired-min-ram-mib); }
                                     }
                                 }
 
-                                if vm.state == "stopped" : HorizontalLayout {
-                                    spacing: Theme.space-xs;
-                                    Text {
-                                        text: "Network:";
-                                        color: Theme.text-muted;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                    Button {
-                                        text: "Isolated · Offline";
-                                        enabled: vm.network-mode != "isolated";
-                                        clicked => { root.change-network-mode(vm.vm-id, "isolated"); }
-                                    }
-                                    Button {
-                                        text: "NAT · Internet Only";
-                                        enabled: vm.network-mode != "nat";
-                                        clicked => { root.change-network-mode(vm.vm-id, "nat"); }
-                                    }
-                                    Button {
-                                        text: "Host-Only · Local";
-                                        enabled: vm.network-mode != "host-only";
-                                        clicked => { root.change-network-mode(vm.vm-id, "host-only"); }
-                                    }
-                                }
-
-                                // Packet Capture status & Start/Stop trigger
-                                HorizontalLayout {
-                                    spacing: Theme.space-xs;
-                                    alignment: end;
-
-                                    PillBadge {
-                                        text: vm.capture-status-label;
-                                        bg: vm.capture-active ? #065f46 : #1e293b;
-                                        fg: vm.capture-active ? #a7f3d0 : #94a3b8;
-                                    }
-                                    if vm.capture-active : Button {
-                                        text: "■ Stop Capture";
-                                        clicked => { root.stop-capture(vm.vm-id); }
-                                    }
-                                    if !vm.capture-active : Button {
-                                        text: "● Start Capture";
-                                        enabled: vm.state == "running" && vm.capture-supported;
-                                        clicked => { root.start-capture(vm.vm-id); }
+                                if vm.state == "stopped" : Segmented {
+                                    small: true;
+                                    width: 228px;
+                                    items: ["Offline", "Internet", "Local"];
+                                    current: vm.network-mode == "nat" ? 1 : vm.network-mode == "host-only" ? 2 : 0;
+                                    activated(i) => {
+                                        root.change-network-mode(vm.vm-id, i == 1 ? "nat" : i == 2 ? "host-only" : "isolated");
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Saved Snapshots (List / Restore with data-loss modal / Delete)
                     if root.checkpoints.length > 0 : VerticalLayout {
-                        spacing: Theme.space-sm;
-                        Text {
-                            text: "Saved Snapshots (" + root.checkpoints.length + ")";
-                            color: Theme.text-primary;
-                            font-size: 14px;
-                            font-weight: 700;
-                        }
-
-                        for cp in root.checkpoints : Rectangle {
-                            border-radius: Theme.radius-sm;
-                            background: Theme.surface-elevated;
-                            border-width: 1px;
-                            border-color: Theme.border;
-
-                            HorizontalLayout {
-                                padding: Theme.space-md;
-                                alignment: space-between;
-                                spacing: 10px;
-
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text {
-                                        text: cp.vm-name + " — " + cp.label;
-                                        color: Theme.text-primary;
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                    }
-                                    Text {
-                                        text: "Created " + cp.created-at + "  •  Read-only Btrfs snapshot " + cp.short-snap-id + (cp.vm-stopped ? "" : "  •  Stop VM to restore");
-                                        color: Theme.text-muted;
-                                        font-family: Theme.mono-font-family;
-                                        font-size: 11px;
+                        padding-top: 14px;
+                        spacing: 8px;
+                        SectionTitle { text: "SNAPSHOTS"; }
+                        ListGroup {
+                            for cp[ci] in root.checkpoints : ListRow {
+                                title: cp.vm-name + " — " + cp.label;
+                                subtitle: cp.created-at + "  ·  " + cp.short-snap-id + (cp.vm-stopped ? "" : "  ·  stop the Space to restore");
+                                icon: "camera";
+                                icon-tint: Theme.info;
+                                last: ci == root.checkpoints.length - 1;
+                                PushButton {
+                                    text: "Restore";
+                                    icon: "restore";
+                                    small: true;
+                                    enabled: cp.vm-stopped;
+                                    clicked => {
+                                        root.confirm-restore-vm-id = cp.vm-id;
+                                        root.confirm-restore-vm-name = cp.vm-name;
+                                        root.confirm-restore-snap-id = cp.snapshot-id;
+                                        root.confirm-restore-snap-label = cp.label;
+                                        root.confirm-restore-visible = true;
                                     }
                                 }
-
-                                HorizontalLayout {
-                                    spacing: Theme.space-xs;
-                                    Button {
-                                        text: "↺ Restore";
-                                        enabled: cp.vm-stopped;
-                                        clicked => {
-                                            root.confirm-restore-vm-id = cp.vm-id;
-                                            root.confirm-restore-vm-name = cp.vm-name;
-                                            root.confirm-restore-snap-id = cp.snapshot-id;
-                                            root.confirm-restore-snap-label = cp.label;
-                                            root.confirm-restore-visible = true;
-                                        }
-                                    }
-                                    Button {
-                                        text: "Delete";
-                                        clicked => { root.delete-snapshot(cp.vm-id, cp.snapshot-id); }
-                                    }
+                                IconButton {
+                                    icon: "trash";
+                                    tint: Theme.danger;
+                                    clicked => { root.delete-snapshot(cp.vm-id, cp.snapshot-id); }
                                 }
                             }
                         }
                     }
 
-                    // Packet Captures (List & Delete)
                     if root.captures.length > 0 : VerticalLayout {
-                        spacing: Theme.space-sm;
-                        Text {
-                            text: "Packet Captures (" + root.captures.length + ")";
-                            color: Theme.text-primary;
-                            font-size: 14px;
-                            font-weight: 700;
-                        }
-
-                        for cap in root.captures : Rectangle {
-                            border-radius: Theme.radius-sm;
-                            background: Theme.surface-elevated;
-                            border-width: 1px;
-                            border-color: cap.state == "running" ? Theme.success : cap.state == "limit_reached" ? #f59e0b : Theme.border;
-
-                            HorizontalLayout {
-                                padding: Theme.space-md;
-                                alignment: space-between;
-                                spacing: 10px;
-
-                                VerticalLayout {
-                                    spacing: 3px;
-                                    HorizontalLayout {
-                                        spacing: Theme.space-sm;
-                                        Text {
-                                            text: cap.vm-name + " — Capture " + cap.short-capture-id;
-                                            color: Theme.text-primary;
-                                            font-size: 13px;
-                                            font-weight: 700;
-                                            vertical-alignment: center;
-                                        }
-                                        PillBadge {
-                                            text: cap.state;
-                                            bg: cap.state == "running" ? #065f46 : cap.state == "limit_reached" ? #78350f : #1e293b;
-                                            fg: #f8fafc;
-                                        }
-                                        PillBadge {
-                                            text: cap.bytes-label;
-                                            bg: #0f2942;
-                                            fg: #7dd3fc;
-                                        }
-                                    }
-                                    Text {
-                                        text: "Started " + cap.started-at + "  •  " + cap.pcap-hint;
-                                        color: Theme.text-muted;
-                                        font-family: Theme.mono-font-family;
-                                        font-size: 11px;
-                                    }
+                        padding-top: 14px;
+                        spacing: 8px;
+                        SectionTitle { text: "PACKET CAPTURES"; }
+                        ListGroup {
+                            for cap[ki] in root.captures : ListRow {
+                                title: cap.vm-name + " — capture " + cap.short-capture-id;
+                                subtitle: cap.started-at + "  ·  " + cap.pcap-hint;
+                                mono-subtitle: true;
+                                icon: "record";
+                                icon-tint: cap.state == "running" ? Theme.danger : Theme.text-muted;
+                                last: ki == root.captures.length - 1;
+                                Chip {
+                                    text: cap.state == "running" ? "Recording" : cap.state == "limit_reached" ? "Size limit" : "Saved";
+                                    tone: cap.state == "running" ? "danger" : cap.state == "limit_reached" ? "warning" : "success";
+                                    dot: true;
                                 }
-
-                                Button {
-                                    text: "Delete";
+                                Chip {
+                                    text: cap.bytes-label;
+                                }
+                                IconButton {
+                                    icon: "trash";
+                                    tint: Theme.danger;
                                     enabled: cap.state != "running";
                                     clicked => { root.delete-capture(cap.vm-id, cap.capture-id); }
                                 }
@@ -765,431 +633,258 @@ export component MainWindow inherits Window {
                     }
                 }
             }
-        }
 
-        // ================= TAB 1: PLAIN-ENGLISH CREATE SPACE FLOW =================
-        if root.active-tab == 1 : ScrollView {
-            vertical-stretch: 1;
-
-            VerticalLayout {
-                spacing: 14px;
-                padding-right: 8px;
-
-                Rectangle {
-                    border-radius: Theme.radius-md;
-                    background: Theme.surface-bg;
-                    border-width: 1px;
-                    border-color: Theme.border;
+            // ---------- New Space ----------
+            if root.active-tab == 1 : ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 28px;
+                    padding-bottom: 32px;
+                    spacing: 22px;
+                    alignment: start;
 
                     VerticalLayout {
-                        padding: Theme.space-lg;
-                        spacing: 14px;
-
-                        Text {
-                            text: "Create a New Space";
-                            color: Theme.text-primary;
-                            font-size: Theme.font-heading;
-                            font-weight: 800;
-                        }
-                        Text {
-                            text: "No scripts or terminal commands — pick what this Space should do and HyperOS configures Btrfs CoW cloning, memory ballooning, and network sandboxing automatically.";
-                            color: Theme.text-muted;
-                            font-size: Theme.font-base;
-                            wrap: word-wrap;
-                        }
-
-                        // Step 1: Name
-                        VerticalLayout {
-                            spacing: 4px;
-                            Text { text: "1. Give your Space a name"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                            LineEdit {
-                                placeholder-text: "e.g. Banking Vault, Travel Browser, Study Pod";
-                                text <=> root.wizard-name;
-                            }
-                        }
-
-                        // Step 2: Base Template
-                        VerticalLayout {
-                            spacing: Theme.space-xs;
-                            Text { text: "2. Choose a ready-to-use Base Template"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                            HorizontalLayout {
-                                spacing: Theme.space-sm;
-                                for tpl[idx] in root.templates : Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-template-index == idx ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-template-index == idx ? 2px : 1px;
-                                    border-color: root.wizard-template-index == idx ? Theme.accent : Theme.border;
-
-                                    TouchArea { clicked => { root.select-template(idx); } }
-
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 4px;
-                                        Text { text: tpl.label; color: Theme.text-primary; font-size: 13px; font-weight: 700; wrap: word-wrap; }
-                                        Text { text: tpl.description; color: Theme.text-muted; font-size: 11px; wrap: word-wrap; }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Step 3: Network Access (Plain-English Cards)
-                        VerticalLayout {
-                            spacing: Theme.space-xs;
-                            Text { text: "3. Network Access"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                            HorizontalLayout {
-                                spacing: Theme.space-sm;
-
-                                // Offline Vault (isolated)
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-network-mode == 0 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-network-mode == 0 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 0 ? #f59e0b : Theme.border;
-                                    TouchArea { clicked => { root.wizard-network-mode = 0; } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 4px;
-                                        Text { text: "Offline Vault"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Zero internet or local network. Ideal for private files and keys."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
-                                    }
-                                }
-
-                                // NAT (Internet Only)
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-network-mode == 1 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-network-mode == 1 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 1 ? Theme.accent : Theme.border;
-                                    TouchArea { clicked => { root.wizard-network-mode = 1; } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 4px;
-                                        Text { text: "NAT · Internet Only"; color: Theme.accent; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Public internet only. Local LAN, host, and other Spaces are blocked."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
-                                    }
-                                }
-
-                                // Home Network (host-only)
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-network-mode == 2 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-network-mode == 2 ? 2px : 1px;
-                                    border-color: root.wizard-network-mode == 2 ? #8b5cf6 : Theme.border;
-                                    TouchArea { clicked => { root.wizard-network-mode = 2; } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 4px;
-                                        Text { text: "Home Network"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
-                                        Text { text: "Private link to this computer only. No internet access."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Step 4: Memory Profile (Light / Standard / Heavy mapped to virtio-balloon)
-                        VerticalLayout {
-                            spacing: Theme.space-xs;
-                            Text { text: "4. Memory Profile (automatic virtio-balloon sizing)"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                            HorizontalLayout {
-                                spacing: Theme.space-sm;
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-memory-profile == 0 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-memory-profile == 0 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 0 ? Theme.success : Theme.border;
-                                    TouchArea { clicked => { root.select-memory-profile(0); } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 3px;
-                                        Text { text: "Light"; color: Theme.success; font-size: 13px; font-weight: 700; }
-                                        Text { text: "256 → 512 MiB · 1 vCPU"; color: Theme.text-secondary; font-size: 11px; }
-                                        Text { text: "Notes, vaults, lightweight tools"; color: Theme.text-muted; font-size: 10px; }
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-memory-profile == 1 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-memory-profile == 1 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 1 ? Theme.accent : Theme.border;
-                                    TouchArea { clicked => { root.select-memory-profile(1); } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 3px;
-                                        Text { text: "Standard"; color: Theme.accent; font-size: 13px; font-weight: 700; }
-                                        Text { text: "512 → 1024 MiB · 2 vCPUs"; color: Theme.text-secondary; font-size: 11px; }
-                                        Text { text: "Browsing, office, everyday apps"; color: Theme.text-muted; font-size: 10px; }
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: root.wizard-memory-profile == 2 ? Theme.surface-elevated : Theme.canvas-bg;
-                                    border-width: root.wizard-memory-profile == 2 ? 2px : 1px;
-                                    border-color: root.wizard-memory-profile == 2 ? #a855f7 : Theme.border;
-                                    TouchArea { clicked => { root.select-memory-profile(2); } }
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        spacing: 3px;
-                                        Text { text: "Heavy"; color: Theme.text-primary; font-size: 13px; font-weight: 700; }
-                                        Text { text: "1024 → 2048 MiB · up to 4 vCPUs"; color: Theme.text-secondary; font-size: 11px; }
-                                        Text { text: "Media, coding, large workspaces"; color: Theme.text-muted; font-size: 10px; }
-                                    }
-                                }
-                            }
-
-                            // Optional fine-tune balloon range readout + sliders
-                            Rectangle {
-                                border-radius: Theme.radius-sm;
-                                background: Theme.canvas-bg;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                VerticalLayout {
-                                    padding: 10px;
-                                    spacing: Theme.space-xs;
-                                    HorizontalLayout {
-                                        alignment: space-between;
-                                        Text { text: "Max Ceiling (create_vm.ram_mib): " + root.wizard-max-ram-mib + " MiB"; color: Theme.text-muted; font-size: 11px; }
-                                        Text { text: "Idle Balloon Target: " + root.wizard-min-ram-mib + " MiB  •  " + root.wizard-vcpu-count + " vCPU"; color: Theme.accent; font-size: 11px; }
-                                    }
-                                    Slider {
-                                        minimum: 128;
-                                        maximum: 3072;
-                                        value: root.wizard-max-ram-mib;
-                                        changed(val) => {
-                                            root.wizard-max-ram-mib = Math.clamp(Math.round(val / 64) * 64, 128, 3072);
-                                            if (root.wizard-min-ram-mib > root.wizard-max-ram-mib) {
-                                                root.wizard-min-ram-mib = root.wizard-max-ram-mib;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Step 5: Display Mode + Self-Destruct on Close
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                border-radius: Theme.radius-sm;
-                                background: Theme.canvas-bg;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                VerticalLayout {
-                                    padding: Theme.space-md;
-                                    spacing: Theme.space-sm;
-                                    Text { text: "5. Display Mode"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                                    HorizontalLayout {
-                                        spacing: Theme.space-sm;
-                                        Button {
-                                            text: "Seamless App Window";
-                                            primary: root.wizard-display-mode == 0;
-                                            clicked => { root.wizard-display-mode = 0; }
-                                        }
-                                        Button {
-                                            text: "Full Environment";
-                                            primary: root.wizard-display-mode == 1;
-                                            clicked => { root.wizard-display-mode = 1; }
-                                        }
-                                    }
-                                    Text {
-                                        text: root.wizard-display-mode == 0
-                                            ? "Apps appear directly on your HyperOS Workspace with a 2px colored origin border."
-                                            : "Opens as a self-contained virtual desktop window.";
-                                        color: Theme.text-muted;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                border-radius: Theme.radius-sm;
-                                background: Theme.canvas-bg;
-                                border-width: 1px;
-                                border-color: root.wizard-disposable ? #ea580c : Theme.border;
-                                VerticalLayout {
-                                    padding: Theme.space-md;
-                                    spacing: Theme.space-xs;
-                                    Text { text: "6. Lifecycle Safety"; color: Theme.text-secondary; font-size: Theme.font-base; font-weight: 700; }
-                                    CheckBox {
-                                        text: "Disposable (reset disk on stop)";
-                                        checked <=> root.wizard-disposable;
-                                    }
-                                    Text {
-                                        text: "Writable CoW disk resets to its base on every stop or crash; snapshots are disabled for this Space.";
-                                        color: Theme.text-muted;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            alignment: end;
-                            spacing: 10px;
-                            Button { text: "Cancel"; clicked => { root.active-tab = 0; } }
-                            Button { text: "Create Space"; primary: true; clicked => { root.create-vm-submitted(); } }
+                        spacing: 8px;
+                        SectionTitle { text: "NAME"; }
+                        Field {
+                            placeholder: "e.g. Malware lab, Banking, Travel browser";
+                            text <=> root.wizard-name;
                         }
                     }
-                }
-            }
-        }
-
-        // ================= TAB 2: TEMPLATE STORE =================
-        if root.active-tab == 2 : ScrollView {
-            vertical-stretch: 1;
-
-            VerticalLayout {
-                spacing: Theme.space-md;
-                padding-right: 8px;
-
-                Text {
-                    text: "Template Store";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-heading;
-                    font-weight: 800;
-                }
-                Text {
-                    text: "One-click download and SHA-256 verification into /var/lib/hyperos/base-images/. Spaces clone from these templates instantly with zero initial disk overhead.";
-                    color: Theme.text-muted;
-                    font-size: Theme.font-base;
-                    wrap: word-wrap;
-                }
-
-                for card in root.store-cards : Rectangle {
-                    border-radius: Theme.radius-md;
-                    background: Theme.surface-bg;
-                    border-width: 1px;
-                    border-color: card.installed ? Theme.success : card.busy ? Theme.accent : Theme.border;
 
                     VerticalLayout {
-                        padding: Theme.space-md;
-                        spacing: Theme.space-sm;
-
+                        spacing: 8px;
+                        SectionTitle { text: "START FROM"; }
                         HorizontalLayout {
-                            alignment: space-between;
-                            spacing: Theme.space-md;
+                            spacing: 10px;
+                            for tpl[idx] in root.templates : OptionCard {
+                                title: tpl.label;
+                                description: tpl.description;
+                                icon: "package";
+                                tint: Theme.accent;
+                                selected: root.wizard-template-index == idx;
+                                clicked => { root.select-template(idx); }
+                            }
+                        }
+                    }
 
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "NETWORK"; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            OptionCard {
+                                title: "Offline";
+                                description: "No network at all. For private files, keys and detonating samples.";
+                                icon: "lock";
+                                tint: Theme.warning;
+                                selected: root.wizard-network-mode == 0;
+                                clicked => { root.wizard-network-mode = 0; }
+                            }
+                            OptionCard {
+                                title: "Internet only";
+                                description: "Reaches the public internet. Your LAN, this computer and other Spaces stay blocked.";
+                                icon: "globe";
+                                tint: Theme.accent;
+                                selected: root.wizard-network-mode == 1;
+                                clicked => { root.wizard-network-mode = 1; }
+                            }
+                            OptionCard {
+                                title: "This computer only";
+                                description: "A private link to the host. No internet.";
+                                icon: "home";
+                                tint: Theme.info;
+                                selected: root.wizard-network-mode == 2;
+                                clicked => { root.wizard-network-mode = 2; }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "MEMORY"; }
+                        Card {
                             VerticalLayout {
-                                spacing: 4px;
+                                padding: 16px;
+                                spacing: 14px;
+                                Segmented {
+                                    items: ["Light", "Standard", "Heavy"];
+                                    current <=> root.wizard-memory-profile;
+                                    activated(i) => { root.select-memory-profile(i); }
+                                }
                                 HorizontalLayout {
-                                    spacing: Theme.space-sm;
-                                    Text { text: card.title; color: Theme.text-primary; font-size: 15px; font-weight: 700; }
-                                    PillBadge {
-                                        text: card.status-label;
-                                        bg: card.installed ? #065f46 : card.busy ? #083344 : #1e293b;
-                                        fg: #f8fafc;
+                                    Body {
+                                        text: root.wizard-memory-profile == 0 ? "Notes, vaults and small tools." : root.wizard-memory-profile == 1 ? "Browsing, office and everyday apps." : "Media, coding and large workloads.";
+                                        horizontal-stretch: 1;
                                     }
-                                    PillBadge { text: card.download-label; bg: #1e293b; fg: #94a3b8; }
+                                    Text {
+                                        text: root.wizard-min-ram-mib + " – " + root.wizard-max-ram-mib + " MiB  ·  " + root.wizard-vcpu-count + " vCPU";
+                                        color: Theme.text-primary;
+                                        font-size: Theme.size-footnote;
+                                        font-weight: 600;
+                                    }
                                 }
-                                Text { text: card.summary; color: Theme.text-muted; font-size: Theme.font-base; wrap: word-wrap; }
+                                RangeSlider {
+                                    minimum: 128;
+                                    maximum: 3072;
+                                    value: root.wizard-max-ram-mib;
+                                    changed(val) => {
+                                        root.wizard-max-ram-mib = Math.clamp(Math.round(val / 64) * 64, 128, 3072);
+                                        if (root.wizard-min-ram-mib > root.wizard-max-ram-mib) {
+                                            root.wizard-min-ram-mib = root.wizard-max-ram-mib;
+                                        }
+                                    }
+                                }
+                                Caption { text: "The slider sets the most memory this Space may ever use. When idle it shrinks back automatically."; wrap: word-wrap; }
                             }
+                        }
+                    }
 
-                            HorizontalLayout {
-                                alignment: end;
-                                spacing: Theme.space-sm;
-                                if !card.installed : Button {
-                                    text: card.busy ? "Provisioning (" + card.progress-pct + "%)" : "Download & Provision";
-                                    enabled: !card.busy;
-                                    primary: !card.busy;
-                                    clicked => { root.download-store-template(card.image-id); }
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "BEHAVIOUR"; }
+                        ListGroup {
+                            ListRow {
+                                title: "Window style";
+                                subtitle: root.wizard-display-mode == 0 ? "Apps appear on your desktop, edged in this Space's colour." : "Opens as a separate full desktop.";
+                                icon: "window";
+                                Segmented {
+                                    small: true;
+                                    width: 240px;
+                                    items: ["App windows", "Full desktop"];
+                                    current <=> root.wizard-display-mode;
                                 }
-                                if card.installed : Button {
-                                    text: "Create Space →";
-                                    primary: true;
-                                    clicked => { root.use-store-template(card.image-id); }
+                            }
+                            ListRow {
+                                title: "Disposable";
+                                subtitle: "Throw away every change when the Space stops or crashes. Snapshots are turned off.";
+                                icon: "hourglass";
+                                icon-tint: Theme.warning;
+                                last: true;
+                                Switch {
+                                    checked <=> root.wizard-disposable;
                                 }
                             }
                         }
+                    }
 
-                        if card.busy || card.installed : MeterBar {
-                            ratio: card.progress-ratio;
-                            fill-color: card.installed ? Theme.success : Theme.accent;
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        PushButton {
+                            text: "Cancel";
+                            kind: "ghost";
+                            clicked => { root.active-tab = 0; }
+                        }
+                        PushButton {
+                            text: "Create Space";
+                            kind: "primary";
+                            clicked => { root.create-vm-submitted(); }
                         }
                     }
                 }
             }
-        }
 
-        // ================= TAB 3: GUIDED SETTINGS =================
-        if root.active-tab == 3 : ScrollView {
-            vertical-stretch: 1;
+            // ---------- Templates ----------
+            if root.active-tab == 2 : ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 28px;
+                    padding-bottom: 32px;
+                    spacing: 12px;
+                    alignment: start;
 
-            VerticalLayout {
-                spacing: Theme.space-md;
-                padding-right: 8px;
-
-                Text {
-                    text: "Guided Settings";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-heading;
-                    font-weight: 800;
-                }
-
-                // Wi-Fi & Sound Row
-                HorizontalLayout {
-                    spacing: Theme.space-md;
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-                            Text { text: "Wi-Fi & Isolation"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
-                            Text {
-                                text: root.settings-airplane-isolation
-                                    ? "Airplane Isolation active — all radios off"
-                                    : root.settings-wifi-enabled
-                                    ? "Connected to " + root.settings-wifi-name
-                                    : "Wi-Fi disabled";
-                                color: Theme.text-muted;
-                                font-size: Theme.font-base;
+                    for card in root.store-cards : Card {
+                        HorizontalLayout {
+                            padding: 16px;
+                            spacing: 14px;
+                            Tile {
+                                icon: "package";
+                                tint: card.installed ? Theme.success : Theme.accent;
+                                tile-size: 44px;
                             }
-                            CheckBox {
-                                text: "Enable Wi-Fi";
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Headline { text: card.title; vertical-alignment: center; }
+                                    Chip {
+                                        text: card.status-label;
+                                        tone: card.installed ? "success" : card.busy ? "accent" : "neutral";
+                                        dot: true;
+                                    }
+                                    Chip { text: card.download-label; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Body { text: card.summary; }
+                                if card.busy : Meter {
+                                    ratio: card.progress-ratio;
+                                    fill: Theme.accent;
+                                }
+                            }
+                            if !card.installed : PushButton {
+                                text: card.busy ? card.progress-pct + "%" : "Get";
+                                icon: card.busy ? "" : "plus";
+                                kind: "secondary";
+                                enabled: !card.busy;
+                                clicked => { root.download-store-template(card.image-id); }
+                            }
+                            if card.installed : PushButton {
+                                text: "New Space";
+                                kind: "primary";
+                                clicked => { root.use-store-template(card.image-id); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- Settings ----------
+            if root.active-tab == 3 : ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 28px;
+                    padding-bottom: 32px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    SectionTitle { text: "NETWORK"; }
+                    ListGroup {
+                        ListRow {
+                            title: "Wi-Fi";
+                            subtitle: root.settings-airplane-isolation ? "Off while Airplane isolation is on" : root.settings-wifi-enabled ? root.settings-wifi-name : "Off";
+                            icon: root.settings-wifi-enabled ? "wifi" : "wifi-off";
+                            Switch {
                                 checked <=> root.settings-wifi-enabled;
                                 toggled => { root.settings-changed(); }
                             }
-                            CheckBox {
-                                text: "Airplane Isolation (pause all network uplinks)";
+                        }
+                        ListRow {
+                            title: "Airplane isolation";
+                            subtitle: "Cut every uplink for all Spaces at once";
+                            icon: "shield";
+                            icon-tint: Theme.warning;
+                            last: true;
+                            Switch {
                                 checked <=> root.settings-airplane-isolation;
                                 toggled => { root.settings-changed(); }
                             }
                         }
                     }
 
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-                            HorizontalLayout {
-                                alignment: space-between;
-                                Text { text: "Sound & PipeWire"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
-                                Text { text: root.settings-sound-muted ? "Muted" : root.settings-sound-volume + "%"; color: Theme.accent; font-size: Theme.font-base; font-weight: 700; }
-                            }
-                            Slider {
+                    Rectangle { height: 12px; }
+                    SectionTitle { text: "SOUND"; }
+                    ListGroup {
+                        ListRow {
+                            title: "Volume";
+                            subtitle: root.settings-sound-muted ? "Muted" : root.settings-sound-volume + "%";
+                            icon: root.settings-sound-muted ? "volume-off" : "volume";
+                            RangeSlider {
+                                width: 220px;
                                 minimum: 0;
                                 maximum: 100;
                                 value: root.settings-sound-volume;
@@ -1198,73 +893,78 @@ export component MainWindow inherits Window {
                                     root.settings-changed();
                                 }
                             }
-                            CheckBox {
-                                text: "Mute speaker output";
+                        }
+                        ListRow {
+                            title: "Mute";
+                            icon: "volume-off";
+                            icon-tint: Theme.text-muted;
+                            Switch {
                                 checked <=> root.settings-sound-muted;
                                 toggled => { root.settings-changed(); }
                             }
-                            CheckBox {
-                                text: "Forward Space audio over virtio-vsock";
+                        }
+                        ListRow {
+                            title: "Sound from Spaces";
+                            subtitle: "Play guest audio through this computer";
+                            icon: "volume";
+                            icon-tint: Theme.info;
+                            last: true;
+                            Switch {
                                 checked <=> root.settings-guest-audio;
                                 toggled => { root.settings-changed(); }
                             }
                         }
                     }
-                }
 
-                // Display Scaling & Btrfs CoW Storage Savings Row
-                HorizontalLayout {
-                    spacing: Theme.space-md;
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-                            Text { text: "Display & Scaling"; color: Theme.text-primary; font-size: 14px; font-weight: 700; }
-                            HorizontalLayout {
-                                spacing: Theme.space-sm;
-                                Button {
-                                    text: "100% Standard";
-                                    primary: root.settings-display-scale == 100;
-                                    clicked => { root.settings-display-scale = 100; root.settings-changed(); }
-                                }
-                                Button {
-                                    text: "125% Cozy";
-                                    primary: root.settings-display-scale == 125;
-                                    clicked => { root.settings-display-scale = 125; root.settings-changed(); }
-                                }
-                                Button {
-                                    text: "150% Large";
-                                    primary: root.settings-display-scale == 150;
-                                    clicked => { root.settings-display-scale = 150; root.settings-changed(); }
+                    Rectangle { height: 12px; }
+                    SectionTitle { text: "DISPLAY"; }
+                    ListGroup {
+                        ListRow {
+                            title: "Scale";
+                            icon: "monitor";
+                            Segmented {
+                                small: true;
+                                width: 220px;
+                                items: ["100%", "125%", "150%"];
+                                current: root.settings-display-scale == 150 ? 2 : root.settings-display-scale == 125 ? 1 : 0;
+                                activated(i) => {
+                                    root.settings-display-scale = i == 2 ? 150 : i == 1 ? 125 : 100;
+                                    root.settings-changed();
                                 }
                             }
-                            CheckBox {
-                                text: "Smooth window snapping transitions (180 ms)";
+                        }
+                        ListRow {
+                            title: "Smooth window animations";
+                            icon: "sparkle";
+                            last: true;
+                            Switch {
                                 checked <=> root.settings-smooth-transitions;
                                 toggled => { root.settings-changed(); }
                             }
                         }
                     }
 
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: Theme.radius-md;
-                        background: Theme.surface-bg;
-                        border-width: 1px;
-                        border-color: Theme.success;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-                            Text { text: "Btrfs CoW Storage Savings"; color: Theme.success; font-size: 14px; font-weight: 700; }
-                            Text { text: root.cow-headline; color: Theme.text-primary; font-size: 15px; font-weight: 800; }
-                            MeterBar { ratio: root.cow-savings-ratio; fill-color: Theme.success; }
-                            Text { text: root.cow-detail; color: Theme.text-muted; font-size: 11px; wrap: word-wrap; }
+                    Rectangle { height: 12px; }
+                    SectionTitle { text: "STORAGE"; }
+                    Card {
+                        HorizontalLayout {
+                            padding: 16px;
+                            spacing: 14px;
+                            Tile {
+                                icon: "disk";
+                                tint: Theme.success;
+                                tile-size: 40px;
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 8px;
+                                Headline { text: root.cow-headline; }
+                                Meter {
+                                    ratio: root.cow-savings-ratio;
+                                    fill: Theme.success;
+                                }
+                                Caption { text: root.cow-detail; wrap: word-wrap; }
+                            }
                         }
                     }
                 }
@@ -1272,101 +972,55 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ================= HARD POWER-OFF CONFIRMATION MODAL =================
-    if root.confirm-stop-visible : Rectangle {
-        x: 0px;
-        y: 0px;
+    // ================= Toast =================
+    // Success messages fade after 4 s; errors stay until dismissed.
+    property <bool> toast-dismissed: false;
+    changed status-message => { root.toast-dismissed = false; }
+    Timer {
+        interval: 4s;
+        running: root.status-message != "" && !root.status-is-error && !root.toast-dismissed;
+        triggered => { root.toast-dismissed = true; }
+    }
+    if root.status-message != "" && !root.toast-dismissed : Toast {
+        dismissed => { root.toast-dismissed = true; }
+        text: root.status-message;
+        error: root.status-is-error;
+        width: Math.min(560px, parent.width - 320px);
+        x: 232px + (parent.width - 232px - self.width) / 2;
+        y: parent.height - self.height - 20px;
+    }
+
+    // ================= Sheets =================
+    if root.confirm-stop-visible : Sheet {
         width: parent.width;
         height: parent.height;
-        background: #020617cc;
-
-        TouchArea {}
-
-        Rectangle {
-            width: 480px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            border-radius: Theme.radius-md;
-            background: Theme.surface-bg;
-            border-width: 2px;
-            border-color: Theme.danger;
-
-            VerticalLayout {
-                padding: 20px;
-                spacing: Theme.space-md;
-                Text { text: "Hard Power-Off Warning"; color: Theme.danger; font-size: 16px; font-weight: 700; }
-                Text {
-                    text: "Closing \"" + root.confirm-stop-vm-name + "\" sends stop_vm, which immediately powers off the Space without a graceful shutdown. Unsaved files inside it may be lost.";
-                    color: Theme.text-secondary;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-                if root.confirm-stop-vm-disposable : Text {
-                    text: "Disposable mode is enabled — this Space's writable CoW disk will be permanently reset on stop.";
-                    color: Theme.danger;
-                    font-size: Theme.font-base;
-                    wrap: word-wrap;
-                }
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-                    Button { text: "Cancel"; clicked => { root.confirm-stop-visible = false; } }
-                    Button {
-                        text: "Force Close Space";
-                        primary: true;
-                        clicked => {
-                            root.confirm-stop-visible = false;
-                            root.confirm-stop-vm(root.confirm-stop-vm-id);
-                        }
-                    }
-                }
-            }
+        title: "Stop “" + root.confirm-stop-vm-name + "”?";
+        message: "This switches the Space off immediately, like pulling the plug. Anything unsaved inside it may be lost.";
+        note: root.confirm-stop-vm-disposable ? "This Space is disposable: every change since it started will be erased." : "";
+        icon: "power";
+        tone: "danger";
+        confirm-text: "Stop Space";
+        confirm-kind: "danger-solid";
+        cancelled => { root.confirm-stop-visible = false; }
+        confirmed => {
+            root.confirm-stop-visible = false;
+            root.confirm-stop-vm(root.confirm-stop-vm-id);
         }
     }
 
-    // ================= SNAPSHOT RESTORE DATA-LOSS CONFIRMATION MODAL =================
-    if root.confirm-restore-visible : Rectangle {
-        x: 0px;
-        y: 0px;
+    if root.confirm-restore-visible : Sheet {
         width: parent.width;
         height: parent.height;
-        background: #020617cc;
-
-        TouchArea {}
-
-        Rectangle {
-            width: 490px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            border-radius: Theme.radius-md;
-            background: Theme.surface-bg;
-            border-width: 2px;
-            border-color: #f59e0b;
-
-            VerticalLayout {
-                padding: 20px;
-                spacing: Theme.space-md;
-                Text { text: "Restore Snapshot Warning"; color: Theme.text-primary; font-size: 16px; font-weight: 700; }
-                Text {
-                    text: "Restoring " + root.confirm-restore-snap-label + " on \"" + root.confirm-restore-vm-name + "\" swaps its current disk atomically. Any disk changes made since this snapshot will be permanently lost.";
-                    color: Theme.text-secondary;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-                    Button { text: "Cancel"; clicked => { root.confirm-restore-visible = false; } }
-                    Button {
-                        text: "Restore Snapshot";
-                        primary: true;
-                        clicked => {
-                            root.confirm-restore-visible = false;
-                            root.confirm-restore-snapshot(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
-                        }
-                    }
-                }
-            }
+        title: "Restore “" + root.confirm-restore-snap-label + "”?";
+        message: "“" + root.confirm-restore-vm-name + "” goes back to how it was when this snapshot was taken. Changes made since then are lost.";
+        icon: "restore";
+        tone: "warning";
+        confirm-text: "Restore";
+        confirm-kind: "primary";
+        cancelled => { root.confirm-restore-visible = false; }
+        confirmed => {
+            root.confirm-restore-visible = false;
+            root.confirm-restore-snapshot(root.confirm-restore-vm-id, root.confirm-restore-snap-id);
         }
     }
 }

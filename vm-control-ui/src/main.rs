@@ -1310,9 +1310,9 @@ mod tests {
         assert_eq!(ui.global::<Theme>().get_density_level(), 1);
         assert_eq!(
             ui.global::<Theme>().get_window_bg(),
-            Color::from_rgb_u8(226, 232, 240)
+            Color::from_rgb_u8(236, 238, 243)
         );
-        assert_eq!(ui.global::<Theme>().get_ui_font_family(), "DejaVu Sans");
+        assert_eq!(ui.global::<Theme>().get_ui_font_family(), "Inter");
         assert!((ui.global::<Theme>().get_font_base() - 13.0).abs() < 0.01);
         assert!((ui.global::<Theme>().get_radius_md() - 12.0).abs() < 0.01);
         assert!((ui.global::<Theme>().get_space_md() - 14.0).abs() < 0.01);
