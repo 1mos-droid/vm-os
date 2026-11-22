@@ -85,26 +85,38 @@ to enlarge the image file:
 truncate -s 8G hyperos.img
 ```
 
-### (Optional) Stage `crosvm` and a Guest Base Image
+### Import a Guest Base Image and Run the Release Check
 
-`/usr/bin/vmm-daemon` is already in the image. `/usr/bin/crosvm` is not, and the
-EROFS root cannot be edited after the build: supply crosvm at build time with
-`BR2_PACKAGE_CROSVM=y` and `BR2_PACKAGE_CROSVM_PREBUILT_BIN=/path/to/crosvm`
-(see the README). Guest base images go on the data partition (partition 3):
+The default configuration builds pinned crosvm and minijail sources, including
+x86_64 sandbox policies. Host build prerequisites now also include libclang
+and a Rust musl target; see [`kernel-buildroot/README.md`](../kernel-buildroot/README.md).
+Import only into an **offline** image, after building a guest:
 
 ```sh
-LOOP_DEV="$(sudo losetup --find --show --partscan hyperos.img)"
-sudo mkdir -p /mnt/hyperos-data
-sudo mount "${LOOP_DEV}p3" /mnt/hyperos-data
-sudo install -d -o root -g root -m 0700 /mnt/hyperos-data/base-images/alpine-3-21-virtio
-sudo cp --sparse=always ./out/alpine-3-21-virtio/disk.raw /mnt/hyperos-data/base-images/alpine-3-21-virtio/disk.raw
-sudo cp ./out/alpine-3-21-virtio/manifest.json /mnt/hyperos-data/base-images/alpine-3-21-virtio/manifest.json
-sudo chmod 0444 /mnt/hyperos-data/base-images/alpine-3-21-virtio/*
-sudo umount /mnt/hyperos-data
-sudo losetup -d "${LOOP_DEV}"
+sudo guest-images/build-alpine-guest.sh --out-dir ./out
+sudo scripts/import-guest-image.py ./out/alpine-3-21-virtio hyperos.img
 ```
 
-There is no import tool yet; this manual step is tracked in `docs/REVIEW_FIXES.md`.
+The importer validates the manifest and both source and copied checksums,
+preserves sparse extents, publishes atomically and refuses to replace an image
+ID. It unmounts and detaches its loop device on success, failure and catchable
+termination. Never run it against a disk attached to a running VM.
+
+For the full build/import/boot flow on nested KVM:
+
+```sh
+sudo scripts/test-v1-release.sh --image output/images/hyperos.img
+# Reuse a previously built guest:
+sudo scripts/test-v1-release.sh --image output/images/hyperos.img --guest-dir out/alpine-3-21-virtio
+```
+
+This uses a scratch image, starts an isolated VM through the daemon, and requires
+Alpine's userspace marker over vsock, KSM off, and headless idle RAM below
+350 MiB. `--dry-run` prints the plan without root or KVM. Serial logs are retained.
+The runner does not automate persistence across a host reboot, graphical RAM
+measurement, Secure Boot or update rollback tests. These need separate hardware
+acceptance; the implementation design is in
+[`VERIFIED_BOOT.md`](../kernel-buildroot/VERIFIED_BOOT.md).
 
 ---
 
@@ -197,7 +209,7 @@ Expected results:
 ### 4.4 Inspect KSM
 
 ```sh
-# 1. Current images set this to 1; once KSM defaults off it will read 0
+# 1. KSM must stay disabled by default (expected: 0)
 cat /sys/kernel/mm/ksm/run
 
 # 2. Inspect KSM merge counters before and after starting two identical guests
@@ -231,7 +243,6 @@ cp --reflink=always \
     --cpus 1 \
     --mem 512 \
     --block path=/var/lib/hyperos/instances/smoke-test/disk.raw,root \
-    --balloon \
     --vsock cid=3 \
     --socket /run/hyperos/smoke-crosvm.sock \
     --serial type=stdout,hardware=serial,console,stdin \

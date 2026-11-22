@@ -1,0 +1,9 @@
+config BR2_PACKAGE_VM_CONTROL_UI
+	bool "vm-control-ui"
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_WAYLAND
+	select BR2_PACKAGE_LIBXKBCOMMON
+	help
+	  Build the local UI crate for musl using host Cargo/Rust.

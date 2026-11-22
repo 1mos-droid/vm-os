@@ -43,14 +43,6 @@ impl CrosvmRunSpec {
     /// Generate exact `crosvm run` CLI arguments (no `--disable-sandbox`, preserving
     /// `crosvm`'s jail/seccomp isolation as required by `ARCHITECTURE.md`).
     pub fn to_crosvm_args(&self) -> Vec<String> {
-        let jail_cfg = if Path::new("/usr/share/policy/crosvm").is_dir() {
-            format!(
-                "pivot-root={},seccomp-policy-dir=/usr/share/policy/crosvm",
-                self.jail_pivot_root.display()
-            )
-        } else {
-            format!("pivot-root={}", self.jail_pivot_root.display())
-        };
         let mut args = vec![
             "run".to_string(),
             "--cpus".to_string(),
@@ -59,14 +51,18 @@ impl CrosvmRunSpec {
             self.ram_mib.to_string(),
             "--block".to_string(),
             format!("path={},root", self.disk_path.display()),
-            "--balloon".to_string(),
             "--vsock".to_string(),
             format!("cid={}", self.vsock_cid),
             "--socket".to_string(),
             self.control_socket.display().to_string(),
-            "--jail-config".to_string(),
-            jail_cfg,
+            "--pivot-root".to_string(),
+            self.jail_pivot_root.display().to_string(),
         ];
+
+        if Path::new("/usr/share/policy/crosvm").is_dir() {
+            args.push("--seccomp-policy-dir".to_string());
+            args.push("/usr/share/policy/crosvm".to_string());
+        }
 
         if self.enable_gpu {
             args.push("--gpu".to_string());
@@ -585,7 +581,10 @@ mod tests {
         };
         let args_iso = spec_iso.to_crosvm_args();
         assert_eq!(args_iso[0], "run");
-        assert!(args_iso.contains(&"--balloon".to_string()));
+        assert!(!args_iso.contains(&"--balloon".to_string()));
+        assert!(!args_iso.contains(&"--no-balloon".to_string()));
+        assert!(args_iso.contains(&"--pivot-root".to_string()));
+        assert!(!args_iso.contains(&"--jail-config".to_string()));
         assert!(args_iso.contains(&"--vsock".to_string()));
         assert!(args_iso.contains(&"cid=3".to_string()));
         assert!(args_iso.contains(&"--gpu".to_string()));

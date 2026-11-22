@@ -1,0 +1,17 @@
+config BR2_PACKAGE_DESKTOP_SHELL
+	bool "desktop-shell"
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_PACKAGE_HAS_UDEV
+	depends on BR2_PACKAGE_HAS_LIBEGL
+	depends on BR2_PACKAGE_HAS_LIBGBM
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_LIBINPUT
+	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_PIXMAN
+	select BR2_PACKAGE_WAYLAND
+	select BR2_PACKAGE_SEATD
+	select BR2_PACKAGE_SEATD_DAEMON
+	help
+	  Build the local UI crate for musl using host Cargo/Rust.

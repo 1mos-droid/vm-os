@@ -225,7 +225,8 @@ async fn end_to_end_lifecycle_balloon_pause_snapshot_network_and_crosvm_args() {
         other => panic!("expected Spawn event, got {other:?}"),
     };
     assert_eq!(spawn_args[0], "run");
-    assert!(spawn_args.contains(&"--balloon".to_string()));
+    assert!(!spawn_args.contains(&"--balloon".to_string()));
+    assert!(spawn_args.contains(&"--pivot-root".to_string()));
     assert!(spawn_args.contains(&"--vsock".to_string()));
     assert!(spawn_args.contains(&"--gpu".to_string()));
     assert!(spawn_args.contains(&"--net".to_string()));

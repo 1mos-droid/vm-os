@@ -111,6 +111,7 @@ for symbol in ('BR2_x86_64', 'BR2_x86_corei7', 'BR2_CCACHE',
                'BR2_INIT_NONE', 'BR2_SYSTEM_BIN_SH_DASH',
                'BR2_LINUX_KERNEL_INSTALL_TARGET',
                'BR2_PACKAGE_BUSYBOX', 'BR2_PACKAGE_RUNIT', 'BR2_PACKAGE_VMM_DAEMON',
+               'BR2_PACKAGE_CROSVM', 'BR2_PACKAGE_JQ', 'BR2_PACKAGE_SOCAT',
                'BR2_PACKAGE_BTRFS_PROGS', 'BR2_PACKAGE_IPROUTE2', 'BR2_PACKAGE_NFTABLES',
                'BR2_PACKAGE_UTIL_LINUX', 'BR2_PACKAGE_UTIL_LINUX_BINARIES',
                'BR2_PACKAGE_UTIL_LINUX_PARTX', 'BR2_TARGET_GRUB2',
@@ -158,6 +159,10 @@ for script in ('scripts/validate-configs.sh', 'scripts/test-v1-release.sh'):
     sp = root / script
     require(sp.is_file() and os.access(sp, os.X_OK), f'{sp} must exist and be executable')
     subprocess.run(['sh', '-n', str(sp)], check=True)
+
+require('echo 0 > /sys/kernel/mm/ksm/run' in
+        (ext / 'rootfs-overlay/etc/sv/ksm/run').read_text(), 'KSM must default off')
+subprocess.run(['sh', '-n', str(ext / 'rootfs-overlay/usr/bin/hyperos-vm')], check=True)
 
 # Guard against regression in GNU readelf PT_INTERP parsing and post-staging audit.
 build_initramfs = (ext / 'initramfs/build-initramfs.sh').read_text()

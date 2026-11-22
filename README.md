@@ -18,8 +18,7 @@ HyperOS is a minimal, security-focused `x86_64` virtualization host OS built to 
 
 HyperOS is a working virtualization host foundation, not yet a finished security or research OS. What the default image does **not** do yet:
 
-- **Start a VM.** `crosvm` is not built; you must supply a prebuilt binary (see *Packaging `crosvm`* below). There is no base-image import tool, so guest disks are staged by hand.
-- **Run a GUI.** `desktop-shell/` and `vm-control-ui/` build and run in `--mock` mode on a developer machine but are not packaged into `hyperos.img`.
+- **Run a GUI by default.** Optional Buildroot packages and an unprivileged session are staged; enabling them awaits the UI musl/KMS work (C1). See `kernel-buildroot/README.md`.
 - **Drop root.** `vmm-daemon` and `crosvm` run as root (crosvm keeps its jail/seccomp), and only UID 0 may use the control socket.
 - **Verify boot.** No dm-verity, signed Secure Boot or TPM measurement; no A/B updates.
 - **Restore snapshots, run disposable VMs or capture traffic.** Snapshots can be taken but not restored, listed or deleted through the API.
@@ -111,7 +110,7 @@ scripts/validate-configs.sh --resolved-kernel output/build/linux-6.12.20/.config
 scripts/validate-configs.sh --image output/images/hyperos.img
 ```
 
-> **Packaging `crosvm`:** To bundle a verified musl-linked `/usr/bin/crosvm` binary (and optional seccomp policies under `/usr/share/policy/crosvm`) directly into `rootfs.erofs`, enable `BR2_PACKAGE_CROSVM=y`, `BR2_PACKAGE_CROSVM_PREBUILT_BIN="/path/to/crosvm"`, and optionally `BR2_PACKAGE_CROSVM_SECCOMP_POLICY_DIR="/path/to/policies"` in `output/.config` before `make`.
+> **Packaging `crosvm`:** The default image builds pinned musl-linked crosvm and minijail sources with x86_64 seccomp policies. See [image build and acceptance instructions](kernel-buildroot/README.md).
 
 ### 3. Run the v1 End-to-End Release Demonstration (4 GiB RAM)
 

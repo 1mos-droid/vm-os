@@ -26,7 +26,7 @@ kernel-buildroot/                  # Buildroot BR2_EXTERNAL=... tree
   kernel/hyperos.config             # minimal seed expanded by olddefconfig
   package/runit/                    # upstream runit, missing from Buildroot
   package/vmm-daemon/               # builds vmm-daemon for x86_64-unknown-linux-musl
-  package/crosvm/                   # installs a user-supplied prebuilt crosvm (opt-in)
+  package/crosvm/                   # pinned musl source build and seccomp policies
   initramfs/                        # early-boot init: EROFS + overlay root, data mount/grow
   board/                           # GRUB (UEFI + BIOS), genimage partition layout
   rootfs-overlay/                   # runit stages and service definitions
@@ -42,10 +42,11 @@ scripts/test-v1-release.sh          # QEMU boot + lifecycle release runner
 ```
 
 `/usr/bin/vmm-daemon` is built from `vmm-daemon/` by Buildroot and always
-packaged (`BR2_PACKAGE_VMM_DAEMON=y`). `/usr/bin/crosvm` is **not** built: the
-`crosvm` package only installs a prebuilt binary the builder supplies via
-`BR2_PACKAGE_CROSVM_PREBUILT_BIN`, and it is off in the defconfig, so the default
-image cannot start a VM. The guest kernel is the host's own `/boot/bzImage`
+packaged (`BR2_PACKAGE_VMM_DAEMON=y`). The default configuration also builds
+`/usr/bin/crosvm` and minijail from checksum-pinned sources, with x86_64 seccomp
+policies. `scripts/import-guest-image.py` admits verified guest builder outputs
+to an offline image; `hyperos-vm <image_id>` creates and starts an isolated VM.
+The guest kernel is the host's own `/boot/bzImage`
 (direct kernel boot, `root=/dev/vda1`). The daemon accepts no arguments, reads no
 UI-provided host paths, listens on the socket below, uses `/dev/kvm` without
 software emulation fallback, supervises crosvm children, and handles SIGTERM by

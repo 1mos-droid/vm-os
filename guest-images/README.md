@@ -63,22 +63,30 @@ Per `ARCHITECTURE.md`, `/var/lib/hyperos/` is a dedicated Btrfs filesystem (`roo
 
 ### Importing a Base Image
 
-Validate the SHA-256 digest in `manifest.json` before admitting the base image, then mark it read-only so instances can never mutate it:
+Import a builder output into an **offline** host image:
 
 ```sh
-IMAGE_ID="alpine-3-21-virtio"
-DEST="/var/lib/hyperos/base-images/${IMAGE_ID}"
-
-# 1. Verify manifest checksum before import
-EXPECTED="$(jq -r '.sha256' "./out/${IMAGE_ID}/manifest.json")"
-echo "${EXPECTED}  ./out/${IMAGE_ID}/disk.raw" | sha256sum -c -
-
-# 2. Copy onto the Btrfs data partition with strict permissions
-install -d -o root -g root -m 0700 "${DEST}"
-cp --sparse=always "./out/${IMAGE_ID}/disk.raw" "${DEST}/disk.raw"
-cp "./out/${IMAGE_ID}/manifest.json" "${DEST}/manifest.json"
-chmod 0444 "${DEST}/disk.raw" "${DEST}/manifest.json"
+sudo scripts/import-guest-image.py out/alpine-3-21-virtio output/images/hyperos.img
 ```
+
+The host needs Python 3, GNU `cp`, `losetup`, `blkid`, and Btrfs mounting support.
+The tool validates the image ID and SHA-256 before mounting, verifies the copy,
+preserves sparse extents, installs read-only files, and publishes atomically.
+Existing IDs are never overwritten. The destination must have the current
+partition-3 `HYPEROS_DATA` Btrfs layout and must not be in use by a VM or mounted
+elsewhere. Unmount or loop-detach failures are errors and preserve the data.
+
+After booting HyperOS, run `hyperos-vm alpine-3-21-virtio` as root or a member of
+`hyperos` to create and start a 512 MiB isolated VM. For a complete host-side
+scratch build/import/boot check, use
+`sudo scripts/test-v1-release.sh --image output/images/hyperos.img`.
+
+The daemon directly boots the host's `/boot/bzImage` with `root=/dev/vda1`.
+Its built-in virtio block, ext4 and console drivers are therefore required; the
+guest's installed kernel and initramfs are not used by this path. The Alpine
+builder includes an OpenRC userspace marker, sent to the serial console and,
+when the opt-in release-test listener is present, host vsock port 5002. The
+release runner requires that marker; a crosvm PID alone does not prove boot.
 
 ### Zero-Overhead Cloning with `cp --reflink=always`
 

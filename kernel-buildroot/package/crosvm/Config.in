@@ -1,25 +1,12 @@
 config BR2_PACKAGE_CROSVM
-	bool "crosvm (hypervisor binary & sandbox policy)"
+	bool "crosvm"
 	depends on BR2_x86_64
+	depends on BR2_USE_MMU
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_LIBCAP
+	select BR2_PACKAGE_WAYLAND
 	help
-	  Install a pinned musl-linked crosvm hypervisor binary at
-	  /usr/bin/crosvm and optional seccomp policy files under
-	  /usr/share/policy/crosvm.
-
-if BR2_PACKAGE_CROSVM
-
-config BR2_PACKAGE_CROSVM_PREBUILT_BIN
-	string "path to prebuilt musl crosvm binary"
-	default ""
-	help
-	  Absolute path to a verified x86_64 musl-linked crosvm binary
-	  to install into /usr/bin/crosvm.
-
-config BR2_PACKAGE_CROSVM_SECCOMP_POLICY_DIR
-	string "path to crosvm seccomp policy directory (optional)"
-	default ""
-	help
-	  Optional directory containing crosvm x86_64 seccomp .policy
-	  files to install into /usr/share/policy/crosvm.
-
-endif
+	  Build the pinned crosvm and minijail sources for musl, with
+	  balloon, 2D GPU, TAP networking, and x86_64 seccomp policies.
+	  Requires host Cargo/Rust (musl target), Python 3, and libclang.
