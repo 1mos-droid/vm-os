@@ -1,0 +1,82 @@
+name: Assurance monitors
+
+# Regenerates the runtime monitor from the FRET requirements with pinned NASA
+# FRET, Ogma and Copilot, and fails if the committed output is stale.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "assurance/**"
+      - "vmm-daemon/src/assurance/**"
+      - ".github/workflows/assurance.yml"
+  pull_request:
+    paths:
+      - "assurance/**"
+      - "vmm-daemon/src/assurance/**"
+      - ".github/workflows/assurance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FRET_COMMIT: cf0f913cc15c41705e803593297e89cd6056b839
+  OGMA_VERSION: 1.17.0
+  COPILOT_VERSION: 4.8.2
+  GHC_VERSION: "9.6"
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch pinned FRET
+        run: |
+          git clone --quiet https://github.com/NASA-SW-VnV/fret.git "$RUNNER_TEMP/fret"
+          git -C "$RUNNER_TEMP/fret" checkout --quiet "$FRET_COMMIT"
+          # FRET's lockfile pins one dependency to a git+ssh URL; fetch it over HTTPS.
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          cd "$RUNNER_TEMP/fret/fret-electron"
+          ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci --ignore-scripts --no-audit --no-fund
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          cabal-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            ~/.local/bin
+          key: assurance-ghc${{ env.GHC_VERSION }}-ogma${{ env.OGMA_VERSION }}-copilot${{ env.COPILOT_VERSION }}
+
+      - name: Install Ogma and Copilot
+        run: |
+          cabal update
+          cabal install --lib --package-env default \
+            copilot-$COPILOT_VERSION copilot-c99 copilot-core copilot-language copilot-libraries
+          command -v ogma || cabal install --installdir="$HOME/.local/bin" ogma-cli-$OGMA_VERSION
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate monitor
+        run: FRET_DIR="$RUNNER_TEMP/fret" assurance/tools/generate.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: assurance-monitor
+          path: |
+            assurance/requirements/host.fcs.json
+            vmm-daemon/src/assurance/generated/
+
+      - name: Committed monitor matches the requirements
+        run: |
+          git status --porcelain -- assurance vmm-daemon/src/assurance
+          git diff --exit-code -- assurance vmm-daemon/src/assurance
+          test -z "$(git status --porcelain -- assurance vmm-daemon/src/assurance)"
