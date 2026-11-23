@@ -12,6 +12,8 @@ define VMM_DAEMON_BUILD_CMDS
 	cd $(@D) && \
 	CARGO_HOME="$(VMM_DAEMON_CARGO_HOME)" \
 	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$(TARGET_CC)" \
+	CC_x86_64_unknown_linux_musl="$(TARGET_CC)" \
+	AR_x86_64_unknown_linux_musl="$(TARGET_AR)" \
 	RUSTFLAGS="-C target-feature=+crt-static" \
 	cargo build \
 		--release \

@@ -22,6 +22,11 @@ pub struct NetworkAllocation {
     pub host_cidr: String,
     pub guest_ip: String,
     pub subnet_slot: u8,
+    /// The kernel's own listing of this Space's nftables table, recorded right
+    /// after installation. Assurance monitor HYP001 compares the live table
+    /// against it (the kernel normalises rules, e.g. merges adjacent ranges, so
+    /// a fixed text match would be brittle).
+    pub ruleset_baseline: Option<String>,
 }
 
 /// Abstract network sandbox controller implemented for Linux (`ip`/`nft`) and `--dry-run`.
@@ -30,6 +35,9 @@ pub trait NetworkController: Send + Sync {
     fn teardown(&self, alloc: &NetworkAllocation);
     /// Open a frame source seeing both directions of the VM's TAP.
     fn open_capture(&self, alloc: &NetworkAllocation) -> Result<Box<dyn PacketSource>, RpcError>;
+    /// Whether the Space's firewall table is still exactly as installed
+    /// (input to assurance monitor HYP001).
+    fn isolation_intact(&self, alloc: &NetworkAllocation) -> bool;
 }
 
 fn short_id(vm_id: &str) -> String {
@@ -64,6 +72,7 @@ fn build_allocation(vm_id: &str, mode: NetworkMode, slot: u8) -> NetworkAllocati
             host_cidr: format!("10.200.{slot}.1/30"),
             guest_ip: format!("10.200.{slot}.2"),
             subnet_slot: slot,
+            ruleset_baseline: None,
         },
         NetworkMode::HostOnly => NetworkAllocation {
             vm_id: vm_id.to_string(),
@@ -74,6 +83,7 @@ fn build_allocation(vm_id: &str, mode: NetworkMode, slot: u8) -> NetworkAllocati
             host_cidr: format!("10.201.{slot}.1/30"),
             guest_ip: format!("10.201.{slot}.2"),
             subnet_slot: slot,
+            ruleset_baseline: None,
         },
         NetworkMode::Isolated => unreachable!("isolated mode allocates no NIC"),
     }
@@ -153,6 +163,28 @@ impl LinuxNetworkController {
             ));
         }
         Ok(())
+    }
+
+    fn installed_baseline(table: &str) -> Result<String, RpcError> {
+        Self::list_table(table).ok_or_else(|| {
+            RpcError::new(
+                error_code::UNAVAILABLE_CAPABILITY,
+                "nftables sandbox table missing after installation",
+            )
+        })
+    }
+
+    /// The kernel's current listing of one HyperOS table, or `None` if it is gone.
+    fn list_table(table: &str) -> Option<String> {
+        let out = Command::new("nft")
+            .args(["list", "table", "inet", table])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
     }
 
     fn apply_nft_ruleset(script: &str) -> Result<(), RpcError> {
@@ -272,7 +304,7 @@ impl NetworkController for LinuxNetworkController {
             let mut guard = self.used_slots.lock().unwrap();
             allocate_slot(&mut guard)?
         };
-        let alloc = build_allocation(vm_id, mode, slot);
+        let mut alloc = build_allocation(vm_id, mode, slot);
 
         let setup_res = (|| -> Result<(), RpcError> {
             Self::run_ip(&["tuntap", "add", "dev", &alloc.tap_name, "mode", "tap"])?;
@@ -286,6 +318,7 @@ impl NetworkController for LinuxNetworkController {
 
                     let nft_rules = build_nat_nft_ruleset(&alloc, uplink);
                     Self::apply_nft_ruleset(&nft_rules)?;
+                    alloc.ruleset_baseline = Some(Self::installed_baseline(&alloc.nft_table)?);
                 }
                 NetworkMode::HostOnly => {
                     let bridge = alloc.bridge_name.as_deref().expect("host-only bridge");
@@ -297,6 +330,7 @@ impl NetworkController for LinuxNetworkController {
 
                     let nft_rules = build_host_only_nft_ruleset(&alloc, bridge);
                     Self::apply_nft_ruleset(&nft_rules)?;
+                    alloc.ruleset_baseline = Some(Self::installed_baseline(&alloc.nft_table)?);
                 }
                 NetworkMode::Isolated => {}
             }
@@ -338,6 +372,13 @@ impl NetworkController for LinuxNetworkController {
                 )
             })
     }
+
+    fn isolation_intact(&self, alloc: &NetworkAllocation) -> bool {
+        match (&alloc.ruleset_baseline, Self::list_table(&alloc.nft_table)) {
+            (Some(baseline), Some(live)) => *baseline == live,
+            _ => false,
+        }
+    }
 }
 
 /// In-memory mock network controller for `--dry-run` and CI tests (requires no `CAP_NET_ADMIN`).
@@ -348,6 +389,8 @@ pub struct MockNetworkController {
     torn_down: Mutex<Vec<NetworkAllocation>>,
     /// Frames queued per TAP name, consumed by mock capture sources.
     frames: Mutex<HashMap<String, FrameQueue>>,
+    /// VMs whose firewall table a test has "tampered with".
+    tampered: Mutex<HashSet<String>>,
 }
 
 /// Frames waiting to be read by one mock capture source.
@@ -391,6 +434,11 @@ impl MockNetworkController {
         true
     }
 
+    /// Simulate someone flushing or editing the VM's firewall table.
+    pub fn tamper_isolation(&self, vm_id: &str) {
+        self.tampered.lock().unwrap().insert(vm_id.to_string());
+    }
+
     fn frame_queue(&self, tap: &str) -> FrameQueue {
         Arc::clone(
             self.frames
@@ -423,7 +471,8 @@ impl NetworkController for MockNetworkController {
             let mut guard = self.used_slots.lock().unwrap();
             allocate_slot(&mut guard)?
         };
-        let alloc = build_allocation(vm_id, mode, slot);
+        let mut alloc = build_allocation(vm_id, mode, slot);
+        alloc.ruleset_baseline = Some(format!("mock table {}", alloc.nft_table));
         self.active.lock().unwrap().push(alloc.clone());
         Ok(Some(alloc))
     }
@@ -442,6 +491,10 @@ impl NetworkController for MockNetworkController {
         Ok(Box::new(MockPacketSource(
             self.frame_queue(&alloc.tap_name),
         )))
+    }
+
+    fn isolation_intact(&self, alloc: &NetworkAllocation) -> bool {
+        alloc.ruleset_baseline.is_some() && !self.tampered.lock().unwrap().contains(&alloc.vm_id)
     }
 }
 

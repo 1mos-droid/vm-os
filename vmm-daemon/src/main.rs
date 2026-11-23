@@ -171,6 +171,20 @@ async fn run() -> Result<(), String> {
         let _ = shutdown_tx.send(true);
     });
 
+    // Sample the runtime assurance monitor every 2 s, so out-of-band changes
+    // (e.g. a flushed firewall table) are caught without waiting for a request.
+    let monitor_mgr = Arc::clone(&manager);
+    let mut monitor_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => monitor_mgr.check_invariants().await,
+                _ = monitor_shutdown.changed() => break,
+            }
+        }
+    });
+
     server.serve(Arc::clone(&manager), shutdown_rx).await?;
     // Per ARCHITECTURE.md: handle SIGTERM by stopping children and persisting metadata before exit.
     manager.shutdown_all().await;

@@ -168,7 +168,8 @@ Error codes: -32700 parse error; -32600 invalid envelope (including batches or
 notifications); -32601 unknown method; -32602 invalid/unknown/missing params;
 -32603 internal error; -32001 VM/image not found; -32002 invalid VM state;
 -32003 insufficient RAM/storage/CPU resources; -32004 unavailable capability
-(KVM, balloon, crosvm, network); -32005 storage/process I/O failure. Messages are
+(KVM, balloon, crosvm, network); -32005 storage/process I/O failure; -32006 host
+invariant violated (see "Runtime assurance" below). Messages are
 human-readable, omit secrets/host paths, and are not parsed by clients. Invalid
 requests must not mutate VM, disk or network state.
 
@@ -341,6 +342,38 @@ The image must provide the `hyperos` group, the `kvm` group with `/dev/kvm`
 `root:kvm 0660`, an unprivileged GUI user in `hyperos`, and the
 `/var/lib/hyperos` and `captures/` modes above (set by `/etc/sv/storage/run`).
 KSM is `run=0`.
+
+## Runtime assurance (R1, R2)
+
+The host's isolation and resource invariants are written in NASA FRET
+(`assurance/requirements/host.json`), formalised by FRET into past-time LTL, and
+turned by NASA Ogma and Copilot into a constant-memory C monitor that
+`vmm-daemon` links (`vmm-daemon/src/assurance/generated/`). CI regenerates the
+monitor with pinned FRET, Ogma and Copilot and fails if the committed copy is
+stale (`.github/workflows/assurance.yml`).
+
+| Id | Requirement (FRETish) | Observation |
+| --- | --- | --- |
+| HYP001 | `host shall always satisfy nat_spaces_lan_blocked = nat_spaces_running` | Every running or paused `nat` Space's nftables table still equals the kernel's own listing recorded right after it was installed |
+| HYP002 | `host shall always satisfy reserved_ram_mib <= ram_budget_mib` | Maximum RAM of running and paused Spaces vs `MemTotal − 768 MiB` |
+| HYP003 | `host shall always satisfy largest_capture_bytes <= 268435456` | Largest capture this daemon has written |
+
+FRET formalises each as `H(P)`: P has held at every sample so far. The daemon
+samples after every request and every 2 seconds. A violation is therefore
+permanent for the life of the daemon process, and the daemon **fails closed**:
+
+* HYP001: every `nat` Space whose table changed is stopped (hard power-off).
+* Any violation: `create_vm`, `start_vm` (including resume) and `start_capture`
+  return `-32006` naming the requirement, until vmm-daemon is restarted. Stop,
+  list, snapshot and delete operations keep working.
+* The violation is logged to the daemon's stderr with the observed values.
+
+| Method | params object | result |
+| --- | --- | --- |
+| `assurance_status` | `{}` | `{"monitors": [{"id": string, "requirement": string, "state": "ok" \| "violated"}, ...]}` in the order above |
+
+Planned: "no crosvm process runs as UID 0" once A2 lands (today it would always
+fire).
 
 ## Build, boot and acceptance
 

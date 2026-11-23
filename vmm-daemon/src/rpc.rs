@@ -45,6 +45,7 @@ pub mod error_code {
     pub const INSUFFICIENT_RESOURCES: i64 = -32003;
     pub const UNAVAILABLE_CAPABILITY: i64 = -32004;
     pub const IO_FAILURE: i64 = -32005;
+    pub const INVARIANT_VIOLATED: i64 = -32006;
 }
 
 /// Exact RPC method names defined in `ARCHITECTURE.md`.
@@ -64,6 +65,7 @@ pub mod method {
     pub const STOP_CAPTURE: &str = "stop_capture";
     pub const LIST_CAPTURES: &str = "list_captures";
     pub const DELETE_CAPTURE: &str = "delete_capture";
+    pub const ASSURANCE_STATUS: &str = "assurance_status";
 }
 
 /// Validate a JSON-RPC request ID: 1-64 ASCII letters, digits, `_`, or `-`.
@@ -262,6 +264,23 @@ pub struct ListCapturesResult {
     pub captures: Vec<Capture>,
 }
 
+/// One runtime monitor in `assurance_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssuranceMonitor {
+    pub id: String,
+    pub requirement: String,
+    /// Exactly `ok` or `violated`.
+    pub state: String,
+}
+
+/// Wire `assurance_status` result object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssuranceStatusResult {
+    pub monitors: Vec<AssuranceMonitor>,
+}
+
 /// Wire `list_vms` result object (`ARCHITECTURE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -377,6 +396,7 @@ pub enum RpcCall {
     StopCapture(VmIdParams),
     ListCaptures(VmIdParams),
     DeleteCapture(CaptureRefParams),
+    AssuranceStatus(EmptyParams),
 }
 
 /// Validated incoming JSON-RPC 2.0 request.
@@ -537,6 +557,9 @@ pub fn parse_request_line(line: &str) -> Result<ParsedRequest, RequestParseError
         method::START_CAPTURE => RpcCall::StartCapture(parse_params(params_val, &id, method_name)?),
         method::STOP_CAPTURE => RpcCall::StopCapture(parse_params(params_val, &id, method_name)?),
         method::LIST_CAPTURES => RpcCall::ListCaptures(parse_params(params_val, &id, method_name)?),
+        method::ASSURANCE_STATUS => {
+            RpcCall::AssuranceStatus(parse_params(params_val, &id, method_name)?)
+        }
         method::DELETE_CAPTURE => {
             RpcCall::DeleteCapture(parse_params(params_val, &id, method_name)?)
         }
@@ -718,6 +741,32 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn parses_assurance_status_strictly() {
+        let req = parse_request_line(
+            r#"{"jsonrpc":"2.0","id":"a1","method":"assurance_status","params":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(req.call, RpcCall::AssuranceStatus(_)));
+        let err = parse_request_line(
+            r#"{"jsonrpc":"2.0","id":"a2","method":"assurance_status","params":{"x":1}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.error.code, error_code::INVALID_PARAMS);
+
+        let status = AssuranceStatusResult {
+            monitors: vec![AssuranceMonitor {
+                id: "HYP001".to_string(),
+                requirement: "host shall always satisfy p".to_string(),
+                state: "ok".to_string(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"monitors":[{"id":"HYP001","requirement":"host shall always satisfy p","state":"ok"}]}"#
+        );
     }
 
     #[test]
