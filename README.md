@@ -178,18 +178,6 @@ docs/               Plan, testing guide, proposals, images
 ```
 </details>
 
-## 🤖 Credits
-
-v0.2.0 was built by three AI coding agents working from one plan, reviewed by the maintainer.
-
-| | Agent | Built |
-| :-: | --- | --- |
-| 🟠 | **Claude** (Anthropic) | API contract v2 · LAN-blocked NAT · non-root socket access · disposable VMs · snapshots · packet capture |
-| 🟢 | **Codex** (OpenAI) | crosvm from pinned source · KSM off · guest import & one-command boot · UI packaging · verified-boot design |
-| 🔵 | **Antigravity** (Google) | KMS desktop shell & VM Studio · non-root connection · research UI · data-only themes · app manifest proposal |
-
-Each commit names its author agent in a `Co-Authored-By` trailer.
-
 ## 🤝 Contributing · 🔐 Security · ⚖️ License
 
 - **Contributing:** read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
