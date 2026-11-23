@@ -1,17 +1,18 @@
 //! Core `VmManager` coordinating storage, network sandboxing, `crosvm` supervision,
 //! RAM admission control, startup reconciliation, disposable-VM cleanup, snapshot restore,
-//! packet capture, and SIGTERM shutdown.
+//! packet capture, runtime assurance monitoring, and SIGTERM shutdown.
 
+use crate::assurance::{self, HyperosSample};
 use crate::capture::{CaptureHandle, CAPTURE_LIMIT_BYTES};
 use crate::hypervisor::{
     ChildExitReason, CrosvmRunSpec, HypervisorController, DEFAULT_GUEST_KERNEL,
 };
 use crate::network::{NetworkAllocation, NetworkController};
 use crate::rpc::{
-    balloon_bytes, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name, Capture,
-    CaptureState, CreateVmParams, EmptyParams, ListCapturesResult, ListSnapshotsResult,
-    ListVmsResult, NetworkMode, RpcError, Snapshot, Vm, VmState, HOST_RAM_RESERVE_MIB,
-    MAX_VCPU_COUNT, MAX_VM_RAM_MIB, MIN_VCPU_COUNT, MIN_VM_RAM_MIB,
+    balloon_bytes, error_code, is_valid_image_id, is_valid_uuid, is_valid_vm_name,
+    AssuranceMonitor, AssuranceStatusResult, Capture, CaptureState, CreateVmParams, EmptyParams,
+    ListCapturesResult, ListSnapshotsResult, ListVmsResult, NetworkMode, RpcError, Snapshot, Vm,
+    VmState, HOST_RAM_RESERVE_MIB, MAX_VCPU_COUNT, MAX_VM_RAM_MIB, MIN_VCPU_COUNT, MIN_VM_RAM_MIB,
 };
 use crate::storage::{DaemonVmPolicy, StorageManager};
 use std::collections::{BTreeMap, HashMap};
@@ -84,6 +85,9 @@ pub struct VmManager {
     vms: RwLock<BTreeMap<String, ManagedVm>>,
     /// Latest capture per VM. A handle may have finished on its own (`limit_reached`).
     captures: Mutex<HashMap<String, CaptureHandle>>,
+    /// Requirements the assurance monitor has reported violated. Latched for
+    /// the life of the process: the daemon fails closed until restarted.
+    violations: std::sync::Mutex<Vec<&'static str>>,
 }
 
 impl VmManager {
@@ -118,6 +122,7 @@ impl VmManager {
             vm_locks: Mutex::new(HashMap::new()),
             vms: RwLock::new(reconciled),
             captures: Mutex::new(HashMap::new()),
+            violations: std::sync::Mutex::new(Vec::new()),
         });
 
         Ok(mgr)
@@ -257,6 +262,7 @@ impl VmManager {
     }
 
     pub async fn create_vm(&self, params: CreateVmParams) -> Result<Vm, RpcError> {
+        self.assurance_gate()?;
         if !is_valid_vm_name(&params.name) {
             return Err(RpcError::new(
                 error_code::INVALID_PARAMS,
@@ -343,6 +349,7 @@ impl VmManager {
         if !is_valid_uuid(vm_id) {
             return Err(RpcError::new(error_code::INVALID_PARAMS, "invalid vm_id"));
         }
+        self.assurance_gate()?;
 
         let lock = self.vm_lock(vm_id).await;
         let _guard = lock.lock().await;
@@ -782,6 +789,7 @@ impl VmManager {
 
     pub async fn start_capture(&self, vm_id: &str) -> Result<Capture, RpcError> {
         self.existing_vm(vm_id).await?;
+        self.assurance_gate()?;
         let lock = self.vm_lock(vm_id).await;
         let _guard = lock.lock().await;
 
@@ -914,6 +922,104 @@ impl VmManager {
         tokio::task::spawn_blocking(move || handle.stop())
             .await
             .ok()
+    }
+
+    /// Refuse new work once any host invariant has been violated.
+    fn assurance_gate(&self) -> Result<(), RpcError> {
+        let violated = self.violations.lock().unwrap_or_else(|p| p.into_inner());
+        if violated.is_empty() {
+            return Ok(());
+        }
+        Err(RpcError::new(
+            error_code::INVARIANT_VIOLATED,
+            format!(
+                "host invariant {} was violated; investigate, then restart vmm-daemon",
+                violated.join(", ")
+            ),
+        ))
+    }
+
+    /// Observe the host, feed the runtime monitor, and respond to violations:
+    /// NAT Spaces whose firewall table changed (HYP001) are stopped, and every
+    /// violation blocks new Spaces and captures until the daemon restarts.
+    pub async fn check_invariants(&self) {
+        let mut observation = HyperosSample {
+            ram_budget_mib: self.host.admission_budget_mib() as i64,
+            reserved_ram_mib: self.active_guest_max_ram_mib().await as i64,
+            ..Default::default()
+        };
+        let mut unprotected = Vec::new();
+        {
+            let map = self.vms.read().await;
+            for entry in map.values() {
+                if !matches!(entry.vm.state, VmState::Running | VmState::Paused)
+                    || entry.vm.network_mode != NetworkMode::Nat
+                {
+                    continue;
+                }
+                observation.nat_spaces_running += 1;
+                let intact = entry
+                    .network
+                    .as_ref()
+                    .is_some_and(|alloc| self.network.isolation_intact(alloc));
+                if intact {
+                    observation.nat_spaces_lan_blocked += 1;
+                } else {
+                    unprotected.push(entry.vm.vm_id.clone());
+                }
+            }
+        }
+        observation.largest_capture_bytes = self
+            .captures
+            .lock()
+            .await
+            .values()
+            .map(|h| h.snapshot().bytes as i64)
+            .max()
+            .unwrap_or(0);
+
+        let violated = assurance::sample(&observation);
+        if violated.is_empty() {
+            return;
+        }
+        {
+            let mut latched = self.violations.lock().unwrap_or_else(|p| p.into_inner());
+            for req in &violated {
+                if !latched.contains(&req.id) {
+                    eprintln!(
+                        "vmm-daemon: ASSURANCE VIOLATION {}: \"{}\" ({observation:?})",
+                        req.id, req.fretish
+                    );
+                    latched.push(req.id);
+                }
+            }
+        }
+        if violated.iter().any(|r| r.id == "HYP001") {
+            for vm_id in unprotected {
+                if let Err(err) = self.stop_vm(&vm_id).await {
+                    eprintln!("vmm-daemon: failed to stop unprotected Space {vm_id}: {err}");
+                }
+            }
+        }
+    }
+
+    /// State of every runtime monitor.
+    pub fn assurance_status(&self) -> AssuranceStatusResult {
+        let latched = self.violations.lock().unwrap_or_else(|p| p.into_inner());
+        AssuranceStatusResult {
+            monitors: assurance::REQUIREMENTS
+                .iter()
+                .map(|r| AssuranceMonitor {
+                    id: r.id.to_string(),
+                    requirement: r.fretish.to_string(),
+                    state: if latched.contains(&r.id) {
+                        "violated".to_string()
+                    } else {
+                        "ok".to_string()
+                    },
+                })
+                .collect(),
+        }
     }
 
     /// Gracefully stop all active VMs and persist metadata before daemon exit (`SIGTERM`).

@@ -265,6 +265,13 @@ Express the contract's invariants in FRET and commit the exported project to
 FRET's realizability and consistency checks must pass. Add the requirements to
 `ARCHITECTURE.md` as a contract change first (rule 2).
 
+**Status: done except realizability.** R1a–R1c are HYP001–HYP003 in
+`assurance/requirements/host.json`, formalised by FRET's own parser into
+`host.fcs.json` and documented under "Runtime assurance" in `ARCHITECTURE.md`.
+R1a is observed as firewall-table integrity: drop counters can't show a packet
+that got through, but a changed table can. R1d waits for A2. FRET's
+realizability check needs the Kind 2 or JKind solver and has not been run yet.
+
 ### R2. Runtime monitor (Claude)
 
 Generate C monitors with Ogma/Copilot and commit the **generated C** under
@@ -275,6 +282,14 @@ per-VM nftables drop counters. On a violation: stop the Space, log it, and
 return a new `-32006 invariant violated` error until the user acknowledges it.
 Document the error code in the contract. Unit tests replay event traces that
 must and must not trip each monitor.
+
+**Status: done**, with three changes from the text above. The generated C lives
+in `vmm-daemon/src/assurance/generated/` (Buildroot builds only the crate
+directory). FRET formalises "always" as `H(P)`, so a violation is permanent and
+"acknowledging" means restarting vmm-daemon. Violating traces each run in their
+own test binary because the monitor's state is per process. CI
+(`.github/workflows/assurance.yml`) regenerates the monitor with pinned FRET,
+Ogma 1.17.0 and Copilot 4.8.2 and fails if the committed copy is stale.
 
 ### R3. Violation UI (Antigravity)
 
@@ -360,5 +375,5 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 - [x] A0 (approved 2026-11-22) · [x] A1 · [ ] A2 · [x] A3 · [x] A4 · [x] A5
 - [x] B1 · [x] B2 · [x] B3 · [x] B4 · [x] B5 (design; implementation open) · [ ] B6
 - [x] C1 · [x] C2 · [x] C3 · [x] C4 · [x] C5
-- [ ] R1 · [ ] R2 · [ ] R3 · [ ] R4 · [ ] R5 · [ ] R6
+- [x] R1 (realizability check open) · [x] R2 · [ ] R3 · [ ] R4 · [ ] R5 · [ ] R6
 - [ ] S1 · [ ] S2 · [ ] S3

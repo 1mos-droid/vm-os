@@ -4,11 +4,13 @@ on:
     branches: [main]
     paths:
       - "vmm-daemon/**"
+      - "assurance/**"
       - "ARCHITECTURE.md"
       - ".github/workflows/vmm-daemon-ci.yml"
   pull_request:
     paths:
       - "vmm-daemon/**"
+      - "assurance/**"
       - "ARCHITECTURE.md"
       - ".github/workflows/vmm-daemon-ci.yml"
   workflow_dispatch:
@@ -37,6 +39,8 @@ jobs:
         run: cargo fmt --check
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Install musl C toolchain (assurance monitor is C)
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Check x86_64-unknown-linux-musl target compilation
         run: cargo check --locked --target x86_64-unknown-linux-musl
       - name: Run unit and integration tests

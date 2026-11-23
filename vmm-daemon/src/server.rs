@@ -304,6 +304,9 @@ async fn handle_client(stream: UnixStream, manager: Arc<VmManager>) {
         tokio::spawn(async move {
             let response_bytes = dispatch_call(&mgr, &parsed.id, parsed.call).await;
             let _ = write_frame(&writer_clone, &response_bytes).await;
+            // Re-check host invariants after every request (the daemon also
+            // samples periodically; see main.rs).
+            mgr.check_invariants().await;
             let mut ids = ids_clone.lock().await;
             ids.remove(&parsed.id);
         });
@@ -362,6 +365,7 @@ async fn dispatch_call(manager: &Arc<VmManager>, id: &str, call: RpcCall) -> Vec
         RpcCall::StartCapture(p) => respond(id, manager.start_capture(&p.vm_id).await),
         RpcCall::StopCapture(p) => respond(id, manager.stop_capture(&p.vm_id).await),
         RpcCall::ListCaptures(p) => respond(id, manager.list_captures(&p.vm_id).await),
+        RpcCall::AssuranceStatus(_) => encode_or_error(id, &manager.assurance_status()),
         RpcCall::DeleteCapture(p) => {
             respond(id, manager.delete_capture(&p.vm_id, &p.capture_id).await)
         }

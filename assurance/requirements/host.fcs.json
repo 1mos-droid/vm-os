@@ -1,0 +1,48 @@
+{
+  "host_componentSpec": {
+    "Functions": [],
+    "Internal_variables": [],
+    "Other_variables": [
+      {
+        "name": "nat_spaces_running",
+        "type": "integer"
+      },
+      {
+        "name": "nat_spaces_lan_blocked",
+        "type": "integer"
+      },
+      {
+        "name": "reserved_ram_mib",
+        "type": "integer"
+      },
+      {
+        "name": "ram_budget_mib",
+        "type": "integer"
+      },
+      {
+        "name": "largest_capture_bytes",
+        "type": "integer"
+      }
+    ],
+    "Requirements": [
+      {
+        "name": "HYP001",
+        "fretish": "host shall always satisfy nat_spaces_lan_blocked = nat_spaces_running",
+        "ptLTL": "(H (nat_spaces_lan_blocked = nat_spaces_running))",
+        "CoCoSpecCode": "H((nat_spaces_lan_blocked = nat_spaces_running))"
+      },
+      {
+        "name": "HYP002",
+        "fretish": "host shall always satisfy reserved_ram_mib <= ram_budget_mib",
+        "ptLTL": "(H (reserved_ram_mib <= ram_budget_mib))",
+        "CoCoSpecCode": "H((reserved_ram_mib <= ram_budget_mib))"
+      },
+      {
+        "name": "HYP003",
+        "fretish": "host shall always satisfy largest_capture_bytes <= 268435456",
+        "ptLTL": "(H (largest_capture_bytes <= 268435456))",
+        "CoCoSpecCode": "H((largest_capture_bytes <= 268435456))"
+      }
+    ]
+  }
+}

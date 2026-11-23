@@ -1,0 +1,31 @@
+{
+  "component": "host",
+  "description": "Isolation and resource invariants of the HyperOS host, checked at runtime by vmm-daemon (docs/REVIEW_FIXES.md, Part R).",
+  "variables": [
+    { "name": "nat_spaces_running", "type": "integer", "description": "Running or paused Spaces in nat mode" },
+    { "name": "nat_spaces_lan_blocked", "type": "integer", "description": "Of those, Spaces whose nftables table still drops guest traffic to non-global IPv4, all guest IPv6, and unsolicited traffic to the host" },
+    { "name": "reserved_ram_mib", "type": "integer", "description": "Sum of maximum RAM of running and paused Spaces (MiB)" },
+    { "name": "ram_budget_mib", "type": "integer", "description": "Admission budget: MemTotal - 768 MiB" },
+    { "name": "largest_capture_bytes", "type": "integer", "description": "Size of the largest packet capture written by this daemon (bytes)" }
+  ],
+  "requirements": [
+    {
+      "id": "HYP001",
+      "contract": "NAT semantics",
+      "fretish": "host shall always satisfy nat_spaces_lan_blocked = nat_spaces_running",
+      "rationale": "A nat Space reaches the public internet only. If its firewall table is flushed or altered, the guest could reach the LAN or the host."
+    },
+    {
+      "id": "HYP002",
+      "contract": "Admission control",
+      "fretish": "host shall always satisfy reserved_ram_mib <= ram_budget_mib",
+      "rationale": "Running and paused Spaces must never be promised more RAM than the host can spare; swap is not admission capacity."
+    },
+    {
+      "id": "HYP003",
+      "contract": "Packet capture methods",
+      "fretish": "host shall always satisfy largest_capture_bytes <= 268435456",
+      "rationale": "A capture stops at 256 MiB so a guest cannot fill the data partition."
+    }
+  ]
+}
