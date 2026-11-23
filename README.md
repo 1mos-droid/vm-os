@@ -85,19 +85,38 @@
 
 ```mermaid
 flowchart LR
-    subgraph host["🔒 HyperOS host (read-only root)"]
-        ui["🖥️ Desktop shell<br/>+ VM Studio"]
-        d["⚙️ vmm-daemon<br/>(JSON-RPC over a Unix socket)"]
-        fw["🧱 nftables<br/>per-VM rules"]
-        disk[("💾 Btrfs data<br/>CoW disks · snapshots · pcaps")]
+    subgraph host["🔒 HyperOS host · read-only root"]
+        ui["🖥️ Desktop &amp;<br/>VM Studio"]
+        daemon["⚙️ vmm‑daemon"]
+        disk[("💾 Disks · snapshots<br/>captures")]
+        ui -- "socket" --> daemon
+        daemon --- disk
     end
-    ui -- "hyperos group" --> d
-    d --> vm1["📦 VM: isolated<br/>no network"]
-    d --> vm2["📦 VM: NAT<br/>internet only"]
-    d --> vm3["🗑️ VM: disposable<br/>wiped on stop"]
-    d --- disk
-    vm2 --> fw --> net(("🌐 Internet"))
-    fw -. "❌ blocked" .-> lan(("🏠 Your LAN"))
+
+    subgraph spaces["Spaces · one VM each"]
+        iso["🔇 Offline"]
+        nat["🌍 Internet only"]
+        disp["🗑️ Disposable"]
+    end
+
+    daemon --> iso & nat & disp
+    nat --> fw{{"🧱 Firewall"}}
+    fw -- "allowed" --> net(["🌐 Internet"])
+    fw -. "blocked" .-x lan(["🏠 Your LAN"])
+
+    classDef hostNode fill:#20242e,stroke:#7b8cff,color:#f3f5f9
+    classDef space fill:#181b23,stroke:#3ccf91,color:#f3f5f9
+    classDef guard fill:#181b23,stroke:#f5b74e,color:#f3f5f9
+    classDef good fill:#123326,stroke:#3ccf91,color:#f3f5f9
+    classDef bad fill:#3a1618,stroke:#ff6b6b,color:#f3f5f9
+    class ui,daemon,disk hostNode
+    class iso,nat,disp space
+    class fw guard
+    class net good
+    class lan bad
+    style host fill:#12151c,stroke:#7b8cff,color:#f3f5f9
+    style spaces fill:#12151c,stroke:#3ccf91,color:#f3f5f9
+    linkStyle default stroke:#8b93a7,stroke-width:1.5px
 ```
 
 ## 📊 Status
