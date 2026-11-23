@@ -49,7 +49,8 @@ jobs:
           ghc-version: ${{ env.GHC_VERSION }}
           cabal-version: latest
 
-      - uses: actions/cache@v4
+      - name: Restore Haskell build cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cabal/store
@@ -58,11 +59,23 @@ jobs:
 
       - name: Install Ogma and Copilot
         run: |
+          # Ogma's bzlib-conduit dependency needs the bzip2 C headers.
+          sudo apt-get update && sudo apt-get install -y libbz2-dev
           cabal update
           cabal install --lib --package-env default \
             copilot-$COPILOT_VERSION copilot-c99 copilot-core copilot-language copilot-libraries
           command -v ogma || cabal install --installdir="$HOME/.local/bin" ogma-cli-$OGMA_VERSION
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Save even if a later step fails, so retries don't rebuild from scratch.
+      - name: Save Haskell build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cabal/store
+            ~/.local/bin
+          key: assurance-ghc${{ env.GHC_VERSION }}-ogma${{ env.OGMA_VERSION }}-copilot${{ env.COPILOT_VERSION }}
 
       - name: Regenerate monitor
         run: FRET_DIR="$RUNNER_TEMP/fret" assurance/tools/generate.sh
