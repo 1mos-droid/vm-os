@@ -54,7 +54,7 @@ BIOS-only, ext4 root, no initramfs) is **already fixed** in this commit.
    small enough to review in one sitting.
 6. **Update docs in the same PR.** When you change behavior, update the matching
    "current behavior" text in `ARCHITECTURE.md` (Claude) or the relevant README,
-   and tick the step in §6 of this file.
+   and tick the step in §8 of this file.
 
 ---
 
@@ -236,7 +236,110 @@ change. Claude moves it into `ARCHITECTURE.md` if it is approved.
 
 ---
 
-## 6. Order and dependencies
+## 6. Part R — Research assurance (NASA tools)
+
+Goal: make HyperOS's isolation promises **formally specified and checked at
+runtime**, and give analysts better views of what a sample did. Tools checked
+against their GitHub licences on 2026-11-23.
+
+| Tool | Licence | Role |
+| --- | --- | --- |
+| [FRET](https://github.com/NASA-SW-VnV/fret) | Apache-2.0 | Write requirements in structured English; formalise and consistency-check them |
+| [Ogma](https://github.com/nasa/ogma) + [Copilot](https://github.com/Copilot-Language/copilot) | Apache-2.0 / BSD-3 | Generate constant-memory C runtime monitors from FRET requirements |
+| [IKOS](https://github.com/NASA-SW-VnV/ikos) | NOSA 1.3 | Static analysis of C (CI tool only, never shipped) |
+| [Open MCT](https://github.com/nasa/openmct) | Apache-2.0 | Telemetry dashboards and timelines (runs in a Space, not on the host) |
+| [Telemanom](https://github.com/khundman/telemanom) | BSD-style (JPL) | LSTM anomaly detection on telemetry (runs in a Space; needs TensorFlow) |
+
+Licence rule: NOSA 1.3 is OSI-approved but not FSF-free and not GPL-compatible.
+Nothing under NOSA is vendored into this repo or shipped in `hyperos.img`.
+
+### R1. Security requirements in FRET (Claude)
+
+Express the contract's invariants in FRET and commit the exported project to
+`assurance/requirements/`. Start with:
+- **R1a:** a `nat` Space never sends to a non-global IPv4 range or over IPv6;
+- **R1b:** running and paused Spaces' maximum RAM never exceeds `MemTotal − 768 MiB`;
+- **R1c:** a capture file never exceeds 256 MiB;
+- **R1d** (after A2): no crosvm process runs as UID 0.
+
+FRET's realizability and consistency checks must pass. Add the requirements to
+`ARCHITECTURE.md` as a contract change first (rule 2).
+
+### R2. Runtime monitor (Claude)
+
+Generate C monitors with Ogma/Copilot and commit the **generated C** under
+`assurance/monitors/` (GHC is needed only to regenerate, never in the image).
+Run them inside `vmm-daemon` via a small FFI wrapper, fed by events the daemon
+already owns (VM start/stop, admission, capture size, crosvm UID) and by the
+per-VM nftables drop counters. On a violation: stop the Space, log it, and
+return a new `-32006 invariant violated` error until the user acknowledges it.
+Document the error code in the contract. Unit tests replay event traces that
+must and must not trip each monitor.
+
+### R3. Violation UI (Antigravity)
+
+Show monitor violations in VM Studio and the shell as a danger `Toast` and a
+badge on the affected Space; add an "Assurance" section in Settings listing the
+active monitors and their status. Mock mode first.
+
+### R4. IKOS in CI (Codex)
+
+Optional CI job that runs IKOS over minijail at the pinned commit (the C
+library under crosvm's sandbox). Report findings as an artifact; it does not
+fail the build until the baseline is triaged.
+
+### R5. Telemetry export (Claude)
+
+Add a read-only `export_telemetry {vm_id}` RPC (contract change) that writes
+per-Space CPU, memory, balloon, network-counter and capture events as JSON
+Lines to `captures/<vm_id>/`, readable by the `hyperos` group, like pcaps. No
+network listener on the host.
+
+### R6. Analysis Space (Codex)
+
+A guest-image builder for an "Analysis" Space with Open MCT and Telemanom
+preinstalled. It reads exported telemetry and pcaps through a read-only shared
+folder; it never talks to the host daemon.
+
+## 7. Part S — Science Lab Space (simulation, graphing, calculation)
+
+Heavy science tools never go on the 4 GB host. They ship as an optional
+**Science Lab** guest template, built by `guest-images/` like Alpine and Debian.
+
+| Tool | Licence | For | Included |
+| --- | --- | --- | --- |
+| Python stack: NumPy, SciPy, SymPy, Matplotlib, JupyterLab | BSD / PSF-style | Maths, symbolic algebra, plotting, notebooks | Always |
+| [GMAT](https://github.com/nasa/GMAT) | Apache-2.0 | Orbit and mission design, trajectory optimisation | Always |
+| [OpenMDAO](https://github.com/OpenMDAO/OpenMDAO) | Apache-2.0 | Multidisciplinary design optimisation | Always |
+| [CEA](https://github.com/nasa/cea) | Apache-2.0 | Chemical equilibrium, combustion and rocket performance | Always |
+| [WorldWind (Web)](https://github.com/NASAWorldWind/WebWorldWind) | Apache-2.0 | 3D globe for geospatial results | Always |
+| [Trick](https://github.com/nasa/trick) | NOSA 1.3 | General physics simulation framework | Opt-in |
+| [42](https://github.com/ericstoneking/42) | NOSA | Spacecraft attitude and orbit dynamics | Opt-in |
+| [OpenVSP](https://github.com/OpenVSP/OpenVSP) | NOSA | Aircraft geometry and aerodynamics | Opt-in |
+| [Kamodo](https://github.com/nasa/Kamodo) | NOSA | Space-weather model analysis | Opt-in |
+
+### S1. Science Lab builder (Codex)
+
+`guest-images/build-science-lab-guest.sh`: a Debian Slim base plus the
+"Always" tools, all at pinned versions with recorded checksums, and the usual
+`disk.raw` + `manifest.json` output. Size the disk (about 8 GiB) and document
+the RAM it needs (Standard or Heavy profile).
+
+### S2. Opt-in NASA tools (Codex)
+
+`--with-nosa` downloads Trick, 42, OpenVSP and Kamodo from upstream **at build
+time**, installs each one's NOSA text under `/usr/share/licenses/`, and prints
+the licence terms before building. Without the flag, none are fetched.
+
+### S3. Template and display (Antigravity)
+
+- Add a "Science Lab" card to the Template Store and a "Science" quick start in
+  the shell's search launcher.
+- Default the Space to Full desktop and NAT internet-only (for package installs).
+- Check that GMAT's and OpenVSP's GUIs are usable over crosvm's 2D virtio-gpu,
+  and note any that need the browser-based alternatives instead.
+
+## 8. Order and dependencies
 
 ```text
 Phase 1  B1 crosvm   B2 KSM off   B3 import + one-command VM   C1 buildable UIs   A0 contract PR
@@ -244,6 +347,8 @@ Phase 2  A1 NAT LAN block   A2 unprivileged crosvm   A3 socket auth   B4 package
 Phase 3  A4 restore / disposable / capture   C3 UI for them (mock first, needs A0)
 Phase 4  B5 verified boot + A/B
 Phase 5  C4 themes   C5 app manifest proposal
+Phase 6  R1 FRET requirements → R2 runtime monitor → R3 violation UI   R4 IKOS CI   S1 Science Lab → S2 opt-in NOSA tools → S3 template
+Phase 7  R5 telemetry export → R6 analysis Space
 ```
 
 Everyone can start right away: Claude on A0, Codex on B1–B3, Antigravity on C1.
@@ -255,3 +360,5 @@ Nothing in phase 2 or 3 that touches the API starts until A0 is approved.
 - [x] A0 (approved 2026-11-22) · [x] A1 · [ ] A2 · [x] A3 · [x] A4 · [x] A5
 - [x] B1 · [x] B2 · [x] B3 · [x] B4 · [x] B5 (design; implementation open) · [ ] B6
 - [x] C1 · [x] C2 · [x] C3 · [x] C4 · [x] C5
+- [ ] R1 · [ ] R2 · [ ] R3 · [ ] R4 · [ ] R5 · [ ] R6
+- [ ] S1 · [ ] S2 · [ ] S3
